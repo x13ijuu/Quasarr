@@ -1,0 +1,119 @@
+name: Release Fork
+
+# Fork x13ijuu/Quasarr: builds ghcr.io/x13ijuu/quasarr:<version>-maja.<patch>
+# for the RufuSrv media-stack. No PyPI, no Docker Hub, no Windows exe,
+# amd64 only (single-host deployment). Upstream workflows are removed on
+# this branch; see .github/workflows/Release.yml on upstream for the original.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - maja/main
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '**/*.md'
+
+env:
+  GHCR_ENDPOINT: "ghcr.io/x13ijuu/quasarr"
+
+jobs:
+  version:
+    name: Get Fork Version
+    # Guard: never run on upstream or other forks (e.g. after botched rebases)
+    if: github.repository == 'x13ijuu/Quasarr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Get Fork Version
+        id: version
+        run: |
+          VERSION=$(python quasarr/providers/version.py --fork-version)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "🏷️ Fork version: $VERSION"
+
+  test:
+    name: Run Tests
+    if: github.repository == 'x13ijuu/Quasarr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Run pytest
+        run: |
+          uv sync
+          uv run --with pytest pytest tests/ -q
+
+  build-wheel:
+    name: Build Wheel
+    if: github.repository == 'x13ijuu/Quasarr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Build wheel
+        run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: ./dist/*
+
+  build-docker:
+    name: Build Docker (AMD64)
+    if: github.repository == 'x13ijuu/Quasarr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [ version, test, build-wheel ]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel
+          path: ./docker/dist
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.GHCR_ENDPOINT }}:${{ needs.version.outputs.version }}
+            ${{ env.GHCR_ENDPOINT }}:maja-latest
+          build-args: VS=${{ needs.version.outputs.version }}
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+      - name: Job Summary
+        run: |
+          echo "## 🐳 ${{ env.GHCR_ENDPOINT }}:${{ needs.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY

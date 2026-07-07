@@ -69,8 +69,9 @@ def run():
         sys.stdout = Unbuffered(sys.stdout)
 
         print(f"""┌────────────────────────────────────┐
-  Quasarr {version.get_version()} by RiX
+  Quasarr {version.get_fork_version()} by RiX
   https://github.com/rix1337/Quasarr
+  fork: https://github.com/x13ijuu/Quasarr
 └────────────────────────────────────┘""")
 
         print("\n===== Recommended Services =====")
