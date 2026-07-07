@@ -3,6 +3,7 @@
 # Project by https://github.com/rix1337
 
 import json
+import os
 import time
 import traceback
 from collections import defaultdict
@@ -21,6 +22,32 @@ from quasarr.storage.categories import get_download_category_from_package_id
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
+
+
+def completed_destination():
+    """
+    Opt-in final download directory (Maja fork, F5). When COMPLETED_DIR is set,
+    a package counts as truly "Completed" only once its folder actually exists
+    there — i.e. after an external mover has moved it from the downloader's
+    working dir to the shared destination. Unset -> upstream behaviour (a package
+    is Completed as soon as the downloader reports it finished).
+    """
+    d = os.environ.get("COMPLETED_DIR", "").strip()
+    return d or None
+
+
+def package_at_destination(save_to, completed_dir):
+    """
+    True if the package folder (basename of the downloader's saveTo) exists under
+    completed_dir. Returns (present, final_path).
+    """
+    if not save_to or not completed_dir:
+        return False, None
+    dirname = os.path.basename(save_to.rstrip("/"))
+    if not dirname:
+        return False, None
+    final_path = os.path.join(completed_dir, dirname)
+    return os.path.isdir(final_path), final_path
 
 
 def is_extraction_complete(status):
@@ -576,11 +603,30 @@ def get_packages(shared_state, _cache=None, auto_start=True):
             if not finished and link_details["eta"]:
                 package["eta"] = link_details["eta"]
 
-            location = "history" if error or finished else "queue"
+            # F5 (Maja fork): a finished download is only honestly "Completed" once its
+            # files are actually at the shared destination. Upstream reports Completed as
+            # soon as the downloader finishes — but here the files still sit on the
+            # downloader's working disk until an external mover relocates them, so Sonarr
+            # would try to import from a path that isn't populated yet. When COMPLETED_DIR
+            # is set and the folder is not there yet, keep the package in the queue with a
+            # "Moving" status instead of flipping it to Completed history.
+            moving = False
+            final_storage = None
+            completed_dir = completed_destination()
+            if finished and not error and completed_dir:
+                present, final_path = package_at_destination(
+                    package.get("saveTo", ""), completed_dir
+                )
+                if present:
+                    final_storage = final_path  # report the real, importable path
+                else:
+                    moving = True  # finished downloading, not yet at destination
+
+            location = "queue" if moving else ("history" if error or finished else "queue")
 
             trace(
                 f"Package '{package_name}' -> location={location}, "
-                f"finished={finished}, error={error}, is_archive={is_archive}"
+                f"finished={finished}, error={error}, is_archive={is_archive}, moving={moving}"
             )
 
             packages.append(
@@ -593,6 +639,8 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                     "error": error,
                     "is_archive": is_archive,
                     "extraction_ok": finished and is_archive,
+                    "moving": moving,
+                    "final_storage": final_storage,
                 }
             )
 
@@ -616,6 +664,7 @@ def get_packages(shared_state, _cache=None, auto_start=True):
         if package["location"] == "queue":
             time_left = "23:59:59"
             storage = ""
+            slot_status = "Downloading"  # F5: overridden per branch below
 
             if package["type"] == "linkgrabber":
                 details = package["details"]
@@ -654,6 +703,12 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                     if mb_left == 0:
                         status = "Extracting"
 
+                # F5: finished-but-not-yet-at-destination -> honest "Moving" state.
+                if package.get("moving"):
+                    status = "Moving"
+                    time_left = "0:00:00"
+
+                slot_status = status  # F5: honest per-package status (was hardcoded)
                 name = f"[{status}] {details.get('name', 'unknown')}"
                 package_id = package["comment"]
                 category = get_download_category_from_package_id(package_id)
@@ -679,6 +734,10 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                 except (ZeroDivisionError, ValueError, TypeError):
                     percentage = 0
 
+                # F5 (Maja fork): emit the actually-computed slot status instead of a
+                # hardcoded "Downloading". SABnzbd statuses like Paused/Extracting/Moving
+                # are all "in progress, don't import yet" to Sonarr, so this stays safe
+                # while giving honest visibility. linkgrabber/protected keep the default.
                 downloads["queue"].append(
                     {
                         "index": queue_index,
@@ -689,7 +748,7 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                         "mbleft": int(float(mb_left)) if mb_left else 0,
                         "mb": int(float(mb)) if mb else 0,
                         "bytes": bytes_total,
-                        "status": "Downloading",
+                        "status": slot_status,  # F5: was hardcoded "Downloading"
                         "percentage": percentage,
                         "timeleft": time_left,
                         "type": package_type,
@@ -713,6 +772,11 @@ def get_packages(shared_state, _cache=None, auto_start=True):
             except (KeyError, TypeError, ValueError):
                 size = 0
             storage = details.get("saveTo", "/")
+            # F5 (Maja fork): when the package has reached COMPLETED_DIR, report that
+            # final, importable path instead of the downloader's working dir. This makes
+            # the storage Sonarr imports from correct without a remote-path mapping.
+            if package.get("final_storage"):
+                storage = package["final_storage"]
 
             package_id = package.get("comment")
             # Use package_id if available, otherwise use uuid as fallback for non-Quasarr packages
