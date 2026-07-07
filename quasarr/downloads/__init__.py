@@ -97,6 +97,27 @@ def detect_crypter(url):
     return None, None
 
 
+def _drop_filecrypt_if_disabled(shared_state, classified, title):
+    """Drop filecrypt links from the protected bucket when the kill switch is off."""
+    if shared_state.values.get("filecrypt_enabled", True):
+        return classified
+
+    filecrypt_re = PROTECTED_PATTERNS["filecrypt"]
+    kept, dropped = [], 0
+    for link in classified["protected"]:
+        if filecrypt_re.search(link[0]):
+            dropped += 1
+        else:
+            kept.append(link)
+
+    if dropped:
+        info(
+            f"Filecrypt disabled - dropped <r>{dropped}</r> filecrypt link(s) for {title}"
+        )
+    classified["protected"] = kept
+    return classified
+
+
 def classify_links(links):
     """
     Classify links into direct/auto/protected categories.
@@ -359,6 +380,7 @@ def process_links(
         )
 
     classified = classify_links(links)
+    classified = _drop_filecrypt_if_disabled(shared_state, classified, title)
 
     # PRIORITY 1: Direct hoster links
     if classified["direct"]:

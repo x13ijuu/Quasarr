@@ -7,6 +7,12 @@ from quasarr.storage.setup.common import (
     render_reconnect_success,
     setup_auth,
 )
+from quasarr.storage.setup.filecrypt import (
+    get_filecrypt_setting_data,
+    initialize_filecrypt_setting,
+    refresh_filecrypt_setting,
+    save_filecrypt_setting,
+)
 from quasarr.storage.setup.flaresolverr import (
     delete_skip_flaresolverr_preference,
     flaresolverr_config,
@@ -73,6 +79,7 @@ __all__ = [
     "delete_skip_sonarr_preference",
     "flaresolverr_config",
     "flaresolverr_form_html",
+    "get_filecrypt_setting_data",
     "get_flaresolverr_status_data",
     "get_notification_settings_data",
     "get_radarr_settings_data",
@@ -82,6 +89,7 @@ __all__ = [
     "hostname_form_html",
     "hostnames_config",
     "import_hostnames_from_url",
+    "initialize_filecrypt_setting",
     "initialize_notification_settings",
     "initialize_radarr_client",
     "initialize_sonarr_client",
@@ -92,10 +100,12 @@ __all__ = [
     "jdownloader_config",
     "path_config",
     "radarr_config",
+    "refresh_filecrypt_setting",
     "refresh_notification_settings",
     "refresh_radarr_client",
     "refresh_sonarr_client",
     "render_reconnect_success",
+    "save_filecrypt_setting",
     "save_flaresolverr_url",
     "save_hostnames",
     "save_jdownloader_settings",

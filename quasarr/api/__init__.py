@@ -244,6 +244,10 @@ def get_api(shared_state_dict, shared_state_lock):
         if not isinstance(timeout_slow_mode_settings, dict):
             timeout_slow_mode_settings = {}
 
+        filecrypt_checked = (
+            "checked" if shared_state.values.get("filecrypt_enabled", True) else ""
+        )
+
         def render_notification_toggle_rows(provider):
             provider_toggles = notification_toggles.get(provider, {})
             provider_silent = notification_silent.get(provider, {})
@@ -372,6 +376,31 @@ def get_api(shared_state_dict, shared_state_lock):
                         <div id="timeout-slow-mode-status" class="notification-status"></div>
                         <p class="timeout-slow-mode-actions">{render_button("Save Timeout Settings", "primary", {"onclick": "saveTimeoutSlowModeSettings()", "type": "button", "id": "timeoutSlowModeSaveBtn"})}</p>
                     </div>
+                </div>
+            </details>
+        </div>
+
+        <div class="section">
+            <details id="filecryptDetails">
+                <summary id="filecryptSummary">🔒 Link Protection</summary>
+                <div class="api-settings">
+                    <div class="notification-toggle-list">
+                        <div class="notification-toggle-grid">
+                            <div class="notification-toggle-header">Crypter</div>
+                            <div class="notification-toggle-header toggle-cell">Enabled</div>
+                            <div class="notification-toggle-label">Filecrypt (CAPTCHA)</div>
+                            <div class="notification-toggle-input toggle-cell">
+                                <label class="notification-toggle-control">
+                                    <input type="checkbox" id="filecrypt-enabled" {filecrypt_checked}>
+                                    <span class="notification-toggle-box" aria-hidden="true"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <p class="api-hint">
+                        Disable while filecrypt CAPTCHAs are unsolvable - affected releases fail so *arr grabs an alternative. Applies to new grabs only.
+                    </p>
+                    <div id="filecrypt-status" class="notification-status"></div>
                 </div>
             </details>
         </div>
@@ -1449,7 +1478,41 @@ def get_api(shared_state_dict, shared_state_lock):
                 }}
             }}
 
+            function bindFilecryptToggle() {{
+                var checkbox = document.getElementById('filecrypt-enabled');
+                if (!checkbox) {{
+                    return;
+                }}
+
+                checkbox.addEventListener('change', async function() {{
+                    var enabled = checkbox.checked;
+                    checkbox.disabled = true;
+                    setNotificationStatus('filecrypt-status', 'Saving...', true);
+
+                    try {{
+                        var response = await quasarrApiFetch('/api/filecrypt/settings', {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify({{ enabled: enabled }})
+                        }});
+                        var data = await response.json();
+                        if (!response.ok || !data.success) {{
+                            throw new Error(data.message || 'Failed to save filecrypt setting');
+                        }}
+
+                        checkbox.checked = !!data.enabled;
+                        setNotificationStatus('filecrypt-status', '✅ ' + data.message, true);
+                    }} catch (error) {{
+                        checkbox.checked = !enabled;
+                        setNotificationStatus('filecrypt-status', '❌ ' + error.message, false);
+                    }} finally {{
+                        checkbox.disabled = false;
+                    }}
+                }});
+            }}
+
             bindTimeoutSlowModePreview();
+            bindFilecryptToggle();
         </script>
         """
         # Add logout link for form auth
