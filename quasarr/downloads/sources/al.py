@@ -259,6 +259,14 @@ class Source(AbstractDownloadSource):
                     )
                     invalidate_session(shared_state)
                     StatsHelper(shared_state).increment_failed_decryptions_automatic()
+                    # Maja fork (F3): if this looks like a rate-limit / IP ban, signal it
+                    # so the caller can park the grab and wait for the unban instead of
+                    # failing it (which would make Sonarr blocklist + keep hammering AL).
+                    # Anything that doesn't clearly look like a ban stays a normal failure.
+                    from quasarr.providers.host_bans import HostBannedError, looks_like_ban
+
+                    if looks_like_ban(message) or looks_like_ban(code):
+                        raise HostBannedError(Source.initials, f"code={code}, message={message}")
                     return {}
 
                 try:

@@ -282,6 +282,13 @@ def run():
         )
         updater.start()
 
+        waiter = multiprocessing.Process(
+            target=waiting_worker,
+            args=(shared_state_dict, shared_state_lock),
+            daemon=True,
+        )
+        waiter.start()
+
         try:
             get_api(shared_state_dict, shared_state_lock)
         except KeyboardInterrupt:
@@ -333,6 +340,89 @@ def flaresolverr_checker(shared_state_dict, shared_state_lock):
         pass
     except Exception as e:
         error(f"An unexpected error occurred in FlareSolverr checker: {e}")
+
+
+def waiting_worker(shared_state_dict, shared_state_lock):
+    """
+    Background worker (Maja fork, F3): retries grabs parked while their host was
+    banned, learning the real ban duration, and drains the rest on unban. Also runs
+    the F5b history hygiene. One probe per host per tick; conservative pacing so a
+    probe never re-triggers the ban for the whole backlog.
+    """
+    try:
+        shared_state.set_state(shared_state_dict, shared_state_lock)
+        from quasarr.providers import host_bans
+        from quasarr.downloads import retry_waiting_package
+        from quasarr.downloads.packages import run_history_hygiene
+
+        TICK = 30
+        HYGIENE_EVERY = 10  # ~5 min
+        tick = 0
+        while True:
+            tick += 1
+            try:
+                now = time.time()
+                # Work per host that still has parked packages. A banned host is only
+                # probed when due; an unbanned host with leftover packages is drained
+                # one-per-tick (the 30s tick spaces the drain so it can't instantly
+                # re-trigger the ban for the whole backlog).
+                hosts = {
+                    (ctx.get("source_key") or "").lower()
+                    for _pid, ctx in host_bans.all_waiting()
+                }
+                for source_key in hosts:
+                    if not source_key:
+                        continue
+                    banned = host_bans.is_banned(source_key, now)
+                    if banned and not host_bans.due_for_probe(source_key, now):
+                        continue
+                    item = host_bans.oldest_waiting_for_host(source_key)
+                    if not item:
+                        if banned:
+                            host_bans.record_unban(source_key, now)
+                        continue
+                    package_id, _ctx = item
+                    debug(
+                        f"waiting_worker: {'probing' if banned else 'draining'} "
+                        f"{source_key} with {package_id}"
+                    )
+                    result = retry_waiting_package(shared_state, package_id) or {}
+                    if result.get("waiting"):
+                        # Re-parked (host still/again banned). _park_banned_grab already
+                        # recorded the ban; schedule the next probe with back-off.
+                        host_bans.record_probe_failure(source_key, now)
+                        info(f"waiting_worker: {source_key} still banned, backing off")
+                    elif banned:
+                        learned = host_bans.record_unban(source_key, now)
+                        info(
+                            f"waiting_worker: {source_key} unbanned "
+                            f"(learned ~{int((learned or 0) / 60)}min); draining backlog"
+                        )
+
+                # Give-up sweep: park packages older than the 48h cap fail honestly.
+                for package_id, ctx in host_bans.all_waiting():
+                    age = now - ctx.get("created_at", now)
+                    if age > host_bans.WAITING_MAX_AGE_S:
+                        host_bans.delete_waiting(package_id)
+                        from quasarr.downloads import fail
+
+                        fail(
+                            ctx.get("title", package_id),
+                            package_id,
+                            shared_state,
+                            reason="host ban did not lift within 48h",
+                        )
+                        info(f"waiting_worker: gave up on {package_id} after 48h")
+
+                if tick % HYGIENE_EVERY == 0:
+                    run_history_hygiene(shared_state)
+            except Exception as e:
+                error(f"waiting_worker tick failed: {e}")
+            time.sleep(TICK)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        error(f"waiting_worker crashed: {e}")
 
 
 def update_checker(shared_state_dict, shared_state_lock):

@@ -818,6 +818,48 @@ def get_packages(shared_state, _cache=None, auto_start=True):
         else:
             info(f"Invalid package location {package['location']}")
 
+    # === WAITING PACKAGES (host banned, F3 — Maja fork) ===
+    # Grabs parked while their host was rate-limited/banned. Shown to Sonarr as
+    # honest "Queued" slots (in progress, never failed/imported) with a countdown to
+    # the next unban probe. The waiting_worker retries them and drains on unban.
+    try:
+        from quasarr.providers import host_bans
+
+        waiting = host_bans.all_waiting()
+        if waiting:
+            now = time.time()
+            banned = host_bans.get_banned_hosts(now)
+            for package_id, ctx in waiting:
+                src = (ctx.get("source_key") or "?").upper()
+                retry_after = 0
+                state = banned.get((ctx.get("source_key") or "").lower())
+                if state and state.get("retry_after"):
+                    retry_after = state["retry_after"]
+                secs_left = max(0, int(retry_after - now)) if retry_after else 0
+                mb = ctx.get("size_mb") or 0
+                downloads["queue"].append(
+                    {
+                        "index": queue_index,
+                        "nzo_id": package_id,
+                        "priority": "Normal",
+                        "filename": f"[Waiting for unban: {src}] {ctx.get('title', 'unknown')}",
+                        "cat": get_download_category_from_package_id(package_id),
+                        "mbleft": int(mb),
+                        "mb": int(mb),
+                        "bytes": 0,
+                        "status": "Queued",
+                        "percentage": 0,
+                        "timeleft": format_eta(secs_left),
+                        "type": "waiting",
+                        "uuid": None,
+                        "is_archive": False,
+                        "storage": "",
+                    }
+                )
+                queue_index += 1
+    except Exception as e:
+        debug(f"Failed to render waiting packages: {e}")
+
     # === AUTO-START QUASARR PACKAGES ===
     if auto_start and not linkgrabber_collecting:
         debug("Linkgrabber not collecting, checking for packages to auto-start")
@@ -921,11 +963,67 @@ def get_packages(shared_state, _cache=None, auto_start=True):
     return downloads
 
 
+def run_history_hygiene(shared_state):
+    """
+    F5b (Maja fork): remove Completed history entries whose final folder is gone.
+
+    In-product replacement for the external reconcile_quasarr_history guard. With the
+    honest-Completed path check (F5), a package is only Completed once its folder
+    exists under COMPLETED_DIR; once an importer has picked it up and the external
+    cleanup (hardlink-verified) has removed the folder, that Completed entry would
+    otherwise linger forever and drive the "path does not exist" import loop. The
+    folder's disappearance IS the grace signal — cleanup only removes imported
+    folders — so no timestamp bookkeeping is needed.
+
+    No-op unless COMPLETED_DIR is set (upstream behaviour).
+    """
+    completed_dir = completed_destination()
+    if not completed_dir:
+        return 0
+    try:
+        packages = get_packages(shared_state, auto_start=False)
+    except Exception as e:
+        debug(f"history hygiene: get_packages failed: {e}")
+        return 0
+    removed = 0
+    for item in packages.get("history", []) or []:
+        if item.get("status") != "Completed":
+            continue
+        storage = item.get("storage") or ""
+        # Only manage entries that point at our completed destination.
+        if not storage.startswith(completed_dir):
+            continue
+        if not os.path.isdir(storage):
+            pid = item.get("nzo_id")
+            if pid:
+                debug(f"history hygiene: removing completed {pid} (folder gone: {storage})")
+                try:
+                    delete_package(shared_state, pid, missing_ok=True)
+                    removed += 1
+                except Exception as e:
+                    debug(f"history hygiene: delete {pid} failed: {e}")
+    if removed:
+        info(f"history hygiene: removed {removed} completed entr{'y' if removed == 1 else 'ies'} (imported + cleaned up)")
+    return removed
+
+
 def delete_package(shared_state, package_id, package_title=None, missing_ok=False):
     """Delete a package from JDownloader and/or the database."""
     debug(
         f"delete_package: Starting deletion of package {package_id} (title: {package_title})"
     )
+
+    # F3 (Maja fork): a "waiting for unban" package exists only in the waiting DB —
+    # there is no JD package to remove. Handle it before touching JDownloader.
+    try:
+        from quasarr.providers import host_bans
+
+        if host_bans.get_waiting(package_id):
+            host_bans.delete_waiting(package_id)
+            info(f"Deleted waiting (host-banned) package {package_id}")
+            return True
+    except Exception as e:
+        debug(f"waiting-package delete check failed: {e}")
 
     try:
         # Create cache for this single delete operation

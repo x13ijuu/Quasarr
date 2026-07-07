@@ -142,6 +142,49 @@ class DownloadRetryTests(unittest.TestCase):
         self.assertTrue(result.get("duplicate"))
         mock_process.assert_not_called()
 
+    def test_host_banned_parks_grab_instead_of_failing(self):
+        """A HostBannedError from the source parks the grab (waiting), never fails it."""
+        from quasarr.providers.host_bans import HostBannedError, get_waiting, is_banned
+
+        title = "Bleach.E60.German.1080p.WEB-DL"
+        with ExitStack() as stack:
+            source, mock_process = self._run_with_source(stack, links=None)
+            source.get_download_links.side_effect = HostBannedError("al", "noadblock")
+            result = download(
+                self.state, "Sonarr/4.0", "tv", title,
+                "http://anime-loads.org/media/bleach", 1024, None, None, "al",
+            )
+
+        pkg_id = result["package_id"]
+        self.assertTrue(result["success"])
+        self.assertTrue(result.get("waiting"))
+        self.assertNotIn("failed", result)
+        mock_process.assert_not_called()
+        # Host recorded as banned and the grab parked with full retry context.
+        self.assertTrue(is_banned("al"))
+        parked = get_waiting(pkg_id)
+        self.assertIsNotNone(parked)
+        self.assertEqual(title, parked["title"])
+        self.assertEqual("al", parked["source_key"])
+
+    def test_banned_host_gate_parks_without_hitting_source(self):
+        """When the host is already known-banned, the grab is parked without a request."""
+        from quasarr.providers.host_bans import record_ban, get_waiting
+
+        record_ban("al", "noadblock")
+        title = "Bleach.E61.German.1080p.WEB-DL"
+        with ExitStack() as stack:
+            source, mock_process = self._run_with_source(stack, links=[["u", "al"]])
+            result = download(
+                self.state, "Sonarr/4.0", "tv", title,
+                "http://anime-loads.org/media/bleach", 1024, None, None, "al",
+            )
+
+        self.assertTrue(result.get("waiting"))
+        source.get_download_links.assert_not_called()  # never hit the banned host
+        mock_process.assert_not_called()
+        self.assertIsNotNone(get_waiting(result["package_id"]))
+
 
 if __name__ == "__main__":
     unittest.main()

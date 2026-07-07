@@ -14,6 +14,12 @@ from quasarr.downloads.linkcrypters.hide import decrypt_links_if_hide
 from quasarr.downloads.mirror_filters import filter_final_download_urls
 from quasarr.downloads.packages import get_packages
 from quasarr.downloads.sources import get_sources as get_download_sources
+from quasarr.providers.host_bans import (
+    HostBannedError,
+    is_banned,
+    park_waiting,
+    record_ban,
+)
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
 from quasarr.providers.log import info, warn
 from quasarr.providers.notifications import (
@@ -439,6 +445,41 @@ def process_links(
 # =============================================================================
 
 
+def _park_banned_grab(
+    package_id, source_key, request_from, download_category, title, url,
+    size_mb, password, imdb_id, message="",
+):
+    """
+    Record a host ban and park the full re-download context so the waiting_worker
+    can retry it after the unban. Returns the SAB-style result for download().
+    """
+    record_ban(source_key, message)
+    park_waiting(
+        package_id,
+        {
+            "title": title,
+            "url": url,
+            "size_mb": size_mb,
+            "password": password,
+            "imdb_id": imdb_id,
+            "source_key": source_key,
+            "download_category": download_category,
+            "request_from": request_from,
+            "reason": str(message)[:300],
+        },
+    )
+    info(
+        f'Host "{source_key}" is banned — parked "{title}" to wait for the unban '
+        f"(package {package_id})."
+    )
+    return {
+        "success": True,
+        "package_id": package_id,
+        "title": title,
+        "waiting": True,
+    }
+
+
 def find_existing_package(shared_state, package_id):
     """
     Locate where a package_id already exists, if anywhere.
@@ -455,6 +496,12 @@ def find_existing_package(shared_state, package_id):
         return "protected"
     if shared_state.get_db("failed").retrieve(package_id):
         return "failed"
+
+    # F3 (Maja fork): already parked waiting for a host unban -> genuine duplicate.
+    from quasarr.providers.host_bans import get_waiting
+
+    if get_waiting(package_id):
+        return "waiting"
 
     data = (
         shared_state.run_device_request(
@@ -527,6 +574,23 @@ def download(
         if source_key and isinstance(source_key, str):
             normalized_source_key = source_key.lower().strip()
 
+        # F3 (Maja fork): if the authoritative source is a currently-banned host, do NOT
+        # hit it again — park the grab straight away so we never hammer a banned host
+        # (this is what makes the external hoster-breaker guard unnecessary).
+        if normalized_source_key and is_banned(normalized_source_key):
+            package_id = generate_deterministic_package_id(
+                title, normalized_source_key, client_type, download_category
+            )
+            if not find_existing_package(shared_state, package_id):
+                return {
+                    "package_id": package_id,
+                    **_park_banned_grab(
+                        package_id, normalized_source_key, request_from,
+                        download_category, title, url, size_mb, password, imdb_id,
+                        "host still banned",
+                    ),
+                }
+
         source_candidates = []
         if normalized_source_key and normalized_source_key in download_sources:
             source_candidates.append(
@@ -556,6 +620,21 @@ def download(
                     label = key.upper()
                     detected_source_key = key
                     break
+            except HostBannedError as e:
+                # F3 (Maja fork): host rate-limited/banned us. Park the grab and let the
+                # waiting_worker retry after the unban instead of failing it (which would
+                # make the client blocklist the release and keep hammering the host).
+                banned_key = e.source_key or key
+                package_id = generate_deterministic_package_id(
+                    title, banned_key, client_type, download_category
+                )
+                return {
+                    "package_id": package_id,
+                    **_park_banned_grab(
+                        package_id, banned_key, request_from, download_category,
+                        title, url, size_mb, password, imdb_id, e.message,
+                    ),
+                }
             except Exception as e:
                 info(f"Error getting download links from {key.upper()}: {e}")
                 if not from_source_key or (
@@ -641,6 +720,32 @@ def download(
 
         result = fail(title, package_id, shared_state, reason=f"Unexpected error: {e}")
         return {"package_id": package_id, **result}
+
+
+def retry_waiting_package(shared_state, package_id):
+    """
+    Re-attempt a package parked while its host was banned. Removes the waiting row
+    first so the dedupe check doesn't treat it as a duplicate, then runs the normal
+    download() with the stored context. Returns the download() result (which may
+    park it again if the host is still banned).
+    """
+    from quasarr.providers.host_bans import delete_waiting, get_waiting
+
+    ctx = get_waiting(package_id)
+    if not ctx:
+        return None
+    delete_waiting(package_id)
+    return download(
+        shared_state,
+        ctx.get("request_from", ""),
+        ctx.get("download_category"),
+        ctx.get("title"),
+        ctx.get("url"),
+        ctx.get("size_mb"),
+        ctx.get("password"),
+        ctx.get("imdb_id"),
+        ctx.get("source_key"),
+    )
 
 
 def fail(title, package_id, shared_state, reason="Unknown error"):
