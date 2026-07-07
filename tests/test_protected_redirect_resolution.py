@@ -564,7 +564,7 @@ class ProtectedRedirectDownloadTests(unittest.TestCase):
                 )
             )
             stack.enter_context(
-                patch("quasarr.downloads.package_id_exists", return_value=False)
+                patch("quasarr.downloads.find_existing_package", return_value=None)
             )
             stack.enter_context(
                 patch(

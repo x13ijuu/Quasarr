@@ -229,7 +229,7 @@ class Source(AbstractDownloadSource):
                                         f"CAPTCHA POST returned code={code}, message={message}. Retrying... (attempt {tries})"
                                     )
 
-                                    if "slowndown" in str(message).lower():
+                                    if "slowdown" in str(message).lower():
                                         wait_period = 30
                                         info(
                                             f"CAPTCHAs solved too quickly. Waiting {wait_period} seconds before next attempt..."

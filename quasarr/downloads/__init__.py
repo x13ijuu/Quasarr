@@ -439,12 +439,22 @@ def process_links(
 # =============================================================================
 
 
-def package_id_exists(shared_state, package_id):
-    # DB checks
+def find_existing_package(shared_state, package_id):
+    """
+    Locate where a package_id already exists, if anywhere.
+
+    Returns the source as a string so callers can distinguish a genuine duplicate
+    (currently downloading / already in history / awaiting CAPTCHA) from a stale
+    "failed" marker. A failed marker is NOT a duplicate: it means a previous attempt
+    of this release failed and the client (Sonarr/Radarr) is re-grabbing it — that is
+    a retry request, not a reason to skip.
+
+    Returns one of: "protected", "failed", "queue", "history", or None.
+    """
     if shared_state.get_db("protected").retrieve(package_id):
-        return True
+        return "protected"
     if shared_state.get_db("failed").retrieve(package_id):
-        return True
+        return "failed"
 
     data = (
         shared_state.run_device_request(
@@ -458,9 +468,14 @@ def package_id_exists(shared_state, package_id):
     for section in ("queue", "history"):
         for pkg in data.get(section, []) or []:
             if pkg.get("nzo_id") == package_id:
-                return True
+                return section
 
-    return False
+    return None
+
+
+def package_id_exists(shared_state, package_id):
+    """Backwards-compatible boolean wrapper around find_existing_package()."""
+    return find_existing_package(shared_state, package_id) is not None
 
 
 def download(
@@ -566,10 +581,27 @@ def download(
             title, final_source_key, client_type, download_category
         )
 
-        # Skip Download if package_id already exists
-        if package_id_exists(shared_state, package_id):
-            warn(f"Package {package_id} already exists. Skipping download!")
-            return {"success": True, "package_id": package_id, "title": title}
+        # Decide based on WHERE the package already exists (if anywhere).
+        existing = find_existing_package(shared_state, package_id)
+        if existing == "failed":
+            # Root-cause fix (Maja fork): a "failed" marker is NOT a duplicate. The client
+            # is re-grabbing a release whose previous attempt failed. Upstream skipped here
+            # AND returned success -> the grab was silently swallowed (JD never got it, the
+            # episode stayed missing forever). Clear the stale marker and actually retry.
+            # nzo_id stays deterministic; clients with removeFailedDownloads already dropped
+            # the old failed record, so reusing the id is safe.
+            shared_state.get_db("failed").delete(package_id)
+            info(f"Retrying previously-failed package {package_id} (re-grabbed by client).")
+        elif existing:
+            # Genuine duplicate: currently downloading, already in history, or awaiting a
+            # CAPTCHA solve. Do not add a second copy.
+            info(f"Package {package_id} already exists ({existing}). Skipping duplicate.")
+            return {
+                "success": True,
+                "package_id": package_id,
+                "title": title,
+                "duplicate": True,
+            }
 
         if source_result is None:
             result = fail(
