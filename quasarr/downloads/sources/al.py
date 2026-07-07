@@ -501,8 +501,13 @@ def _extract_season_number_from_title(page_title, release_type, release_title=""
                     if season_candidate >= 2:
                         season_num = season_candidate
 
-            if season_num is None:
-                season_num = 1
+            # Maja fork (F4): do NOT default to season 1. When a series release has no
+            # real season evidence (no SxxEyy in the release title, no "Staffel/Season N"
+            # or trailing >=2 in the page title), it is absolutely numbered — inventing
+            # S01 turned e.g. absolute E57 into "S01E57" (really S03E16), which broke the
+            # Sonarr import with a folder-name conflict. Returning None makes
+            # guess_release_title emit the correct absolute "Series.Name.E57", which
+            # Sonarr's anime parser maps to the right season/episode itself.
 
     return season_num
 
