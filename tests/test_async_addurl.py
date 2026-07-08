@@ -56,34 +56,39 @@ class EnqueueGrabTests(unittest.TestCase):
         self.assertIsNotNone(hb.get_waiting(pid))
         self.assertTrue(hb.get_waiting(pid).get("pending"))
 
-    def test_deterministic_id_matches_download_path(self):
-        title = "Bleach.E111.German.1080p.WEB-DL"
-        expect = downloads.generate_deterministic_package_id(title, "al", "sonarr", "tv")
-        with patch("quasarr.downloads.download"):
-            result = enqueue_grab(
-                self.state, "Sonarr/4.0", "tv", title,
-                "http://anime-loads.org/x", 1024, None, None, "al",
-            )
-        self.assertEqual(expect, result["package_id"])
-
-    def test_regrab_of_pending_is_duplicate(self):
+    def test_each_grab_gets_a_unique_id(self):
+        # SABnzbd contract: every add mints a fresh nzo_id. Two grabs of the SAME
+        # release must NOT collide (that collision with Sonarr's failed-history was
+        # the root cause of orphaned, never-imported re-grabs — E137 2026-07-08).
         title = "Bleach.E112.German.1080p.WEB-DL"
         with patch("quasarr.downloads.download"):
             r1 = enqueue_grab(self.state, "Sonarr/4.0", "tv", title, "u", 1, None, None, "al")
             r2 = enqueue_grab(self.state, "Sonarr/4.0", "tv", title, "u", 1, None, None, "al")
         self.assertTrue(r1.get("queued"))
-        self.assertTrue(r2.get("duplicate"))
-        self.assertEqual(r1["package_id"], r2["package_id"])
+        self.assertTrue(r2.get("queued"))
+        self.assertNotEqual(r1["package_id"], r2["package_id"])   # unique, no dedup
+        # both are parked and processable by the worker
+        self.assertIsNotNone(hb.get_waiting(r1["package_id"]))
+        self.assertIsNotNone(hb.get_waiting(r2["package_id"]))
 
-    def test_regrab_of_failed_clears_marker_and_requeues(self):
+    def test_parked_ctx_carries_its_own_id(self):
+        # The worker reuses this exact id verbatim (download(package_id=...)) so the
+        # id never changes mid-lifecycle.
         title = "Bleach.E113.German.1080p.WEB-DL"
-        pid = downloads.generate_deterministic_package_id(title, "al", "sonarr", "tv")
-        DataBase("failed").store(pid, "{}")
         with patch("quasarr.downloads.download"):
             result = enqueue_grab(self.state, "Sonarr/4.0", "tv", title, "u", 1, None, None, "al")
-        self.assertTrue(result.get("queued"))
-        self.assertIsNone(DataBase("failed").retrieve(pid))   # stale failed cleared
-        self.assertIsNotNone(hb.get_waiting(pid))             # re-queued
+        ctx = hb.get_waiting(result["package_id"])
+        self.assertEqual(result["package_id"], ctx.get("package_id"))
+
+    def test_worker_reuses_the_minted_id(self):
+        # retry_waiting_package must hand the unique id back to download() unchanged.
+        from quasarr.downloads import retry_waiting_package
+        title = "Bleach.E114.German.1080p.WEB-DL"
+        with patch("quasarr.downloads.download") as mock_dl:
+            r = enqueue_grab(self.state, "Sonarr/4.0", "tv", title, "u", 1, None, None, "al")
+            retry_waiting_package(self.state, r["package_id"])
+        _, kwargs = mock_dl.call_args
+        self.assertEqual(r["package_id"], kwargs.get("package_id"))
 
 
 if __name__ == "__main__":
