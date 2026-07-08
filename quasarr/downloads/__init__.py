@@ -551,7 +551,7 @@ def enqueue_grab(
     Sonarr tracks it reliably the whole time. Dedup and delete reuse the existing
     waiting-table machinery.
     """
-    from quasarr.providers.host_bans import park_waiting
+    from quasarr.providers.host_bans import get_waiting, park_waiting
 
     title = normalize_download_title(title)
     client_type = extract_client_type(request_from)
@@ -560,14 +560,20 @@ def enqueue_grab(
         title, src, client_type, download_category
     )
 
-    existing = find_existing_package(shared_state, package_id)
-    if existing == "failed":
-        # A re-grab of a previously-failed release: clear the stale marker so the
-        # worker actually retries it (M1 semantics, but non-blocking).
-        shared_state.get_db("failed").delete(package_id)
-    elif existing:
-        info(f"Package {package_id} already exists ({existing}). Skipping duplicate.")
+    # FAST dedup only against the SQLite tables (protected/failed/waiting). We must
+    # NOT call find_existing_package() here — it does a full JDownloader package fetch
+    # (get_packages), which under a grab burst takes 15-30s and would re-block addurl,
+    # defeating the whole async point (Sonarr times out -> drops tracking). The JD-side
+    # dedup happens later, cheaply, when the background worker runs download() (which
+    # still calls find_existing_package). A JD duplicate slipping through just gets
+    # skipped by the worker — addurl already returned instantly.
+    if get_waiting(package_id):
+        info(f"Package {package_id} already queued/waiting. Skipping duplicate.")
         return {"success": True, "package_id": package_id, "title": title, "duplicate": True}
+    if shared_state.get_db("failed").retrieve(package_id):
+        # Re-grab of a previously-failed release: clear the stale marker so the worker
+        # actually retries it (M1 semantics, but non-blocking).
+        shared_state.get_db("failed").delete(package_id)
 
     park_waiting(
         package_id,
