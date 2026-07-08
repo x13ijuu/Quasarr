@@ -33,6 +33,7 @@ from quasarr.providers.cloudflare import (
     flaresolverr_create_session,
     flaresolverr_destroy_session,
 )
+from quasarr.providers.host_bans import HostBannedError, looks_like_ban
 from quasarr.providers.hostname_issues import mark_hostname_issue
 from quasarr.providers.log import debug, info, trace
 from quasarr.providers.sessions.al import (
@@ -263,8 +264,6 @@ class Source(AbstractDownloadSource):
                     # so the caller can park the grab and wait for the unban instead of
                     # failing it (which would make Sonarr blocklist + keep hammering AL).
                     # Anything that doesn't clearly look like a ban stays a normal failure.
-                    from quasarr.providers.host_bans import HostBannedError, looks_like_ban
-
                     if looks_like_ban(message) or looks_like_ban(code):
                         raise HostBannedError(Source.initials, f"code={code}, message={message}")
                     return {}
@@ -279,6 +278,11 @@ class Source(AbstractDownloadSource):
                         "download",
                         str(e) if "e" in dir() else "Download error",
                     )
+        except HostBannedError:
+            # F3 (Maja fork): must reach download() so the grab is parked and waited on
+            # — do NOT let the generic handler below swallow it into a normal failure.
+            # (The finally block still destroys the FlareSolverr session.)
+            raise
         except Exception as e:
             info(f"Error loading download: {e}")
             mark_hostname_issue(

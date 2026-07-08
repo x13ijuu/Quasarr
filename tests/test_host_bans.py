@@ -29,6 +29,9 @@ class HostBanBaseTest(unittest.TestCase):
 class BanStateTests(HostBanBaseTest):
     def test_looks_like_ban(self):
         self.assertTrue(hb.looks_like_ban("noadblock"))
+        # AL sends the message as a stringified list, e.g. Message: ['noadblock'].
+        self.assertTrue(hb.looks_like_ban(["noadblock"]))
+        self.assertTrue(hb.looks_like_ban("['noadblock']"))
         self.assertTrue(hb.looks_like_ban("Please slowdown"))
         self.assertTrue(hb.looks_like_ban("429 Too Many Requests"))
         self.assertFalse(hb.looks_like_ban("invalid captcha solution"))
