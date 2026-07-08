@@ -355,12 +355,36 @@ def waiting_worker(shared_state_dict, shared_state_lock):
         from quasarr.downloads import retry_waiting_package
         from quasarr.downloads.packages import run_history_hygiene
 
-        TICK = 30
-        HYGIENE_EVERY = 10  # ~5 min
+        TICK = 10
+        HYGIENE_EVERY = 30  # ~5 min
         tick = 0
         while True:
             tick += 1
             try:
+                now = time.time()
+
+                # Async addurl (Maja fork): process freshly-queued 'pending' grabs in the
+                # background so addurl returns instantly. Sequential per host (AL CAPTCHA
+                # is serialized); if a host bans mid-run, stop draining it this tick so we
+                # don't hammer it — the ban-probe loop below takes over.
+                pending = [
+                    (pid, ctx)
+                    for pid, ctx in host_bans.all_waiting()
+                    if ctx.get("pending")
+                ]
+                pending.sort(key=lambda kv: kv[1].get("created_at", 0))
+                banned_this_tick = set()
+                for pid, ctx in pending:
+                    hk = (ctx.get("source_key") or "").lower()
+                    if hk in banned_this_tick or host_bans.is_banned(hk, time.time()):
+                        continue
+                    debug(f"waiting_worker: processing pending {pid} ({hk})")
+                    result = retry_waiting_package(shared_state, pid) or {}
+                    if result.get("waiting"):
+                        # got banned while processing -> _park_banned_grab recorded it
+                        banned_this_tick.add(hk)
+                        host_bans.record_probe_failure(hk, time.time())
+
                 now = time.time()
                 # Work per host that still has parked packages. A banned host is only
                 # probed when due; an unbanned host with leftover packages is drained

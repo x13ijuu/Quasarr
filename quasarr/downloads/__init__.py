@@ -525,6 +525,68 @@ def package_id_exists(shared_state, package_id):
     return find_existing_package(shared_state, package_id) is not None
 
 
+def enqueue_grab(
+    shared_state,
+    request_from,
+    download_category,
+    title,
+    url,
+    size_mb,
+    password,
+    imdb_id,
+    source_key,
+):
+    """
+    Async accept path (Maja fork): the SABnzbd contract expects addurl to return
+    a nzo_id INSTANTLY (just queue it). Upstream/our download() instead scrapes +
+    solves the CAPTCHA + adds to JD inline (15-40s) before answering — so a burst
+    of grabs blocks Sonarr's client requests, Sonarr times out / marks the client
+    unavailable and DROPS the tracking, while Quasarr finishes in the background →
+    orphaned completed downloads that never import. (Root cause of Rufus' 'hängt /
+    verschwindet / kein Import' under load; RSS with 1 grab at a time never hit it.)
+
+    enqueue_grab() persists the grab and returns the deterministic nzo_id at once.
+    The waiting_worker processes it (calls download()) in the background, and
+    get_packages() renders it as a 'Fetching'/Queued slot from the first poll on, so
+    Sonarr tracks it reliably the whole time. Dedup and delete reuse the existing
+    waiting-table machinery.
+    """
+    from quasarr.providers.host_bans import park_waiting
+
+    title = normalize_download_title(title)
+    client_type = extract_client_type(request_from)
+    src = (source_key or "").lower().strip() or "unknown"
+    package_id = generate_deterministic_package_id(
+        title, src, client_type, download_category
+    )
+
+    existing = find_existing_package(shared_state, package_id)
+    if existing == "failed":
+        # A re-grab of a previously-failed release: clear the stale marker so the
+        # worker actually retries it (M1 semantics, but non-blocking).
+        shared_state.get_db("failed").delete(package_id)
+    elif existing:
+        info(f"Package {package_id} already exists ({existing}). Skipping duplicate.")
+        return {"success": True, "package_id": package_id, "title": title, "duplicate": True}
+
+    park_waiting(
+        package_id,
+        {
+            "title": title,
+            "url": url,
+            "size_mb": size_mb,
+            "password": password,
+            "imdb_id": imdb_id,
+            "source_key": source_key,
+            "download_category": download_category,
+            "request_from": request_from,
+            "pending": True,
+        },
+    )
+    info(f'Queued "{title}" for background download (package {package_id}).')
+    return {"success": True, "package_id": package_id, "title": title, "queued": True}
+
+
 def download(
     shared_state,
     request_from,

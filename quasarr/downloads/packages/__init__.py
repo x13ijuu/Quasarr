@@ -818,10 +818,16 @@ def get_packages(shared_state, _cache=None, auto_start=True):
         else:
             info(f"Invalid package location {package['location']}")
 
-    # === WAITING PACKAGES (host banned, F3 — Maja fork) ===
-    # Grabs parked while their host was rate-limited/banned. Shown to Sonarr as
-    # honest "Queued" slots (in progress, never failed/imported) with a countdown to
-    # the next unban probe. The waiting_worker retries them and drains on unban.
+    # === QUEUED / WAITING PACKAGES (Maja fork) ===
+    # Two kinds of DB-parked grabs, both rendered as SABnzbd "Queued" slots (Sonarr
+    # treats Queued as in-progress: never imports, never fails, never blocklists — so
+    # it keeps tracking the nzo_id reliably, which is the whole point):
+    #   * pending  — freshly enqueued by async addurl, worker is about to fetch it
+    #                -> "[Fetching] <title>"
+    #   * waiting  — host banned, worker retries after the (learned) unban
+    #                -> "[Waiting for unban: AL] <title>" with a countdown
+    # mbleft is kept > 0 so the slot reads as real pending work, not a stalled 0-byte
+    # item that Sonarr's no-progress heuristics might flag.
     try:
         from quasarr.providers import host_bans
 
@@ -831,25 +837,28 @@ def get_packages(shared_state, _cache=None, auto_start=True):
             banned = host_bans.get_banned_hosts(now)
             for package_id, ctx in waiting:
                 src = (ctx.get("source_key") or "?").upper()
-                retry_after = 0
+                mb = int(ctx.get("size_mb") or 0) or 1
                 state = banned.get((ctx.get("source_key") or "").lower())
-                if state and state.get("retry_after"):
-                    retry_after = state["retry_after"]
-                secs_left = max(0, int(retry_after - now)) if retry_after else 0
-                mb = ctx.get("size_mb") or 0
+                if state and state.get("retry_after") and not ctx.get("pending"):
+                    secs_left = max(0, int(state["retry_after"] - now))
+                    name = f"[Waiting for unban: {src}] {ctx.get('title', 'unknown')}"
+                    timeleft = format_eta(secs_left)
+                else:
+                    name = f"[Fetching] {ctx.get('title', 'unknown')}"
+                    timeleft = "0:10:00"
                 downloads["queue"].append(
                     {
                         "index": queue_index,
                         "nzo_id": package_id,
                         "priority": "Normal",
-                        "filename": f"[Waiting for unban: {src}] {ctx.get('title', 'unknown')}",
+                        "filename": name,
                         "cat": get_download_category_from_package_id(package_id),
-                        "mbleft": int(mb),
-                        "mb": int(mb),
-                        "bytes": 0,
+                        "mbleft": mb,
+                        "mb": mb,
+                        "bytes": int(mb) * 1024 * 1024,
                         "status": "Queued",
                         "percentage": 0,
-                        "timeleft": format_eta(secs_left),
+                        "timeleft": timeleft,
                         "type": "waiting",
                         "uuid": None,
                         "is_archive": False,

@@ -11,7 +11,7 @@ from xml.etree import ElementTree
 
 from bottle import request
 
-from quasarr.downloads import download
+from quasarr.downloads import download, enqueue_grab
 from quasarr.downloads.packages import delete_package, get_packages
 from quasarr.providers import shared_state
 from quasarr.providers.auth import require_api_key
@@ -232,9 +232,14 @@ def setup_arr_routes(app):
                         return {"status": False, "nzo_ids": [], "quasarr_error": True}
 
                     nzo_ids = []
-                    info(f"Attempting download for <y>{parsed_payload['title']}</y>")
+                    info(f"Queuing download for <y>{parsed_payload['title']}</y>")
 
-                    downloaded = download(
+                    # Async accept (Maja fork): persist + return the nzo_id INSTANTLY
+                    # like real SABnzbd. The background waiting_worker does the actual
+                    # scrape/CAPTCHA/JD-add, so a burst of grabs never blocks Sonarr's
+                    # client requests (which caused timeouts -> dropped tracking ->
+                    # orphaned completed downloads).
+                    downloaded = enqueue_grab(
                         shared_state,
                         request_from,
                         download_category,
@@ -247,18 +252,8 @@ def setup_arr_routes(app):
                     )
 
                     try:
-                        success = downloaded["success"]
                         package_id = downloaded["package_id"]
                         title = downloaded.get("title", parsed_payload["title"])
-                        failed = downloaded.get("failed", False)
-
-                        if success and not failed:
-                            info(f'"{title} added successfully!')
-                        else:
-                            info(
-                                f'"{title} added as failed package! See log for details.'
-                            )
-
                         nzo_ids.append(package_id)
                         return {"status": True, "nzo_ids": nzo_ids}
                     except KeyError:
