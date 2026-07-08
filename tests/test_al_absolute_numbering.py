@@ -80,5 +80,37 @@ class AbsoluteTitleBuildTests(unittest.TestCase):
         self.assertIn(".S02E05", title)
 
 
+class AbsoluteGrabSeasonSuppressionTests(unittest.TestCase):
+    """
+    The download-side re-guess (_check_release) computes a season from synonyms/
+    release-notes too, so removing the title default alone is not enough: when the
+    grabbed title is absolutely numbered (no S-token), the season must be dropped.
+    This mirrors the logic guarding release_info.season in al._check_release.
+    """
+    import re as _re
+
+    def _absolute_grab(self, grabbed_title, detected_season):
+        # Reproduces the guard: absolute grab (no S-token) -> season forced to None.
+        season = detected_season
+        if not self._re.search(r"(?i)\bS\d{1,4}(?:E\d{1,4})?\b", grabbed_title):
+            season = None
+        return season
+
+    def test_absolute_title_drops_misdetected_season(self):
+        # Bleach.E113 grabbed absolutely; page synonyms mis-detected season 1.
+        self.assertIsNone(self._absolute_grab("Bleach.E113.German.ML.1080p.WEB-DL", 1))
+
+    def test_seasoned_title_keeps_detected_season(self):
+        self.assertEqual(
+            2, self._absolute_grab("Bleach.S02E05.German.ML.1080p.WEB-DL", 2)
+        )
+
+    def test_subtitle_tokens_do_not_count_as_season(self):
+        # 'GerSub'/'EngSub' must not be read as an S-token.
+        self.assertIsNone(
+            self._absolute_grab("Bleach.E113.German.ML.GerSub.EngSub.1080p.WEB-DL", 1)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

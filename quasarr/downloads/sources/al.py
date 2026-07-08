@@ -861,6 +861,14 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
                 if episode_in_title:
                     release_info.episode_min = int(episode_in_title)
                     release_info.episode_max = int(episode_in_title)
+                    # Maja fork (F4): the grabbed title is absolutely numbered when it
+                    # carries no season token (e.g. "Bleach.E113"). In that case never
+                    # fabricate a season — a mis-detected S01 (from synonyms/notes) turns
+                    # E113 into "S01E113", which conflicts with the real SxxEyy inside the
+                    # release and breaks Sonarr's auto-import (folder-name check). Keep it
+                    # absolute so Sonarr's anime parser maps it itself.
+                    if not re.search(r"(?i)\bS\d{1,4}(?:E\d{1,4})?\b", title):
+                        release_info.season = None
 
                 guessed_title = _guess_title(page_title, release_info)
                 if guessed_title and guessed_title.lower() != title.lower():
