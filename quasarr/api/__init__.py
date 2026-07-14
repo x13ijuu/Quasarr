@@ -244,6 +244,18 @@ def get_api(shared_state_dict, shared_state_lock):
         if not isinstance(timeout_slow_mode_settings, dict):
             timeout_slow_mode_settings = {}
 
+        filecrypt_checked = (
+            "checked" if shared_state.values.get("filecrypt_enabled", True) else ""
+        )
+
+        def render_switch(input_id, checked):
+            return (
+                '<label class="switch">'
+                f'<input type="checkbox" id="{input_id}" {checked}>'
+                '<span class="switch-slider" aria-hidden="true"></span>'
+                "</label>"
+            )
+
         def render_notification_toggle_rows(provider):
             provider_toggles = notification_toggles.get(provider, {})
             provider_silent = notification_silent.get(provider, {})
@@ -263,16 +275,10 @@ def get_api(shared_state_dict, shared_state_lock):
                     f"""
                     <div class="notification-toggle-label">{case_label}</div>
                     <div class="notification-toggle-input toggle-cell">
-                        <label class="notification-toggle-control">
-                            <input type="checkbox" id="notif-{provider}-{case_key}" {enabled_checked}>
-                            <span class="notification-toggle-box" aria-hidden="true"></span>
-                        </label>
+                        {render_switch(f"notif-{provider}-{case_key}", enabled_checked)}
                     </div>
                     <div class="notification-toggle-input toggle-cell">
-                        <label class="notification-toggle-control">
-                            <input type="checkbox" id="notif-{provider}-{case_key}-silent" {silent_checked}>
-                            <span class="notification-toggle-box" aria-hidden="true"></span>
-                        </label>
+                        {render_switch(f"notif-{provider}-{case_key}-silent", silent_checked)}
                     </div>
                     """
                 )
@@ -295,10 +301,7 @@ def get_api(shared_state_dict, shared_state_lock):
                     <div class="timeout-slow-mode-value" id="timeout-slow-mode-value-{timeout_key}"></div>
                 </div>
                 <div class="notification-toggle-input toggle-cell">
-                    <label class="notification-toggle-control">
-                        <input type="checkbox" id="timeout-slow-{timeout_key}" {checked}>
-                        <span class="notification-toggle-box" aria-hidden="true"></span>
-                    </label>
+                    {render_switch(f"timeout-slow-{timeout_key}", checked)}
                 </div>
                 """
             )
@@ -335,7 +338,7 @@ def get_api(shared_state_dict, shared_state_lock):
 
         <div class="section">
             <details id="apiDetails">
-                <summary id="apiSummary">⚙️ API Configuration</summary>
+                <summary id="apiSummary">⚙️ API</summary>
                 <div class="api-settings">
                     <p class="api-hint">Use these settings for <strong>Newznab Indexer</strong> and <strong>SABnzbd Download Client</strong> in Radarr/Sonarr</p>
 
@@ -377,8 +380,34 @@ def get_api(shared_state_dict, shared_state_lock):
         </div>
 
         <div class="section">
+            <details id="filecryptDetails">
+                <summary id="filecryptSummary">🔒 Link Protection</summary>
+                <div class="api-settings">
+                    <div class="notification-provider-card">
+                        <div class="notification-toggle-grid timeout-toggle-grid">
+                            <div class="notification-toggle-header">Crypter</div>
+                            <div class="notification-toggle-header toggle-cell">Enabled</div>
+                            <div class="notification-toggle-label">
+                                <span class="setting-row-title">Filecrypt</span>
+                                <span class="setting-row-sub">Decrypt CAPTCHA-protected filecrypt links</span>
+                            </div>
+                            <div class="notification-toggle-input toggle-cell">
+                                {render_switch("filecrypt-enabled", filecrypt_checked)}
+                            </div>
+                        </div>
+                    </div>
+                    <p class="api-hint setting-row-hint">
+                        Disable while filecrypt CAPTCHAs are unsolvable — affected releases fail so *arr grabs an alternative. Applies to new grabs only.
+                    </p>
+                    <div id="filecrypt-status" class="notification-status"></div>
+                    <p>{render_button("Save Filecrypt Setting", "primary", {"onclick": "saveFilecryptSettings()", "type": "button", "id": "filecryptSaveBtn"})}</p>
+                </div>
+            </details>
+        </div>
+
+        <div class="section">
             <details id="jdDetails">
-                <summary id="jdSummary"><img src="{images.jdownloader}" type="image/webp" alt="JDownloader logo" class="inline-icon"/> JDownloader Configuration</summary>
+                <summary id="jdSummary"><img src="{images.jdownloader}" type="image/webp" alt="JDownloader logo" class="inline-icon"/> JDownloader</summary>
                 <div class="api-settings">
                     <p class="api-hint"><strong>JDownloader must be running and connected to My JDownloader!</strong></p>
                     
@@ -416,7 +445,7 @@ def get_api(shared_state_dict, shared_state_lock):
 
         <div class="section">
             <details id="flaresolverrDetails">
-                <summary id="flaresolverrSummary"><img src="{images.flaresolverr}" type="image/webp" alt="JDownloader logo" class="inline-icon"/> FlareSolverr Configuration</summary>
+                <summary id="flaresolverrSummary"><img src="{images.flaresolverr}" type="image/webp" alt="JDownloader logo" class="inline-icon"/> FlareSolverr</summary>
                 <div class="api-settings">
                     {flaresolverr_warning}
                     <p class="api-hint">
@@ -439,7 +468,7 @@ def get_api(shared_state_dict, shared_state_lock):
 
         <div class="section">
             <details id="notificationsDetails">
-                <summary id="notificationsSummary">🔔 Notifications Configuration</summary>
+                <summary id="notificationsSummary">🔔 Notifications</summary>
                 <div class="api-settings">
                     <p class="api-hint">
                         It is recommended to configure one provider below for an optimal user experience.
@@ -488,59 +517,56 @@ def get_api(shared_state_dict, shared_state_lock):
         </div>
 
         <div class="section">
-            <details id="radarrDetails">
-                <summary id="radarrSummary">🎬 Radarr Configuration</summary>
+            <details id="arrDetails">
+                <summary id="arrSummary">🎬 *arr</summary>
                 <div class="api-settings">
                     <p class="api-hint">
-                        Optional. Used by Quasarr to look up movie metadata via Radarr's API.
+                        Optional. Used by Quasarr to look up metadata via the *arr APIs.
                     </p>
 
-                    <div class="input-group">
-                        <label for="radarrUrl">URL</label>
-                        <div class="input-row">
-                            <input type="text" id="radarrUrl" placeholder="http://192.168.0.1:7878" value="{radarr_url}">
+                    <div class="notification-provider-card">
+                        <h4>🎬 Radarr</h4>
+                        <p class="api-hint">Look up movie metadata via Radarr's API.</p>
+                        <div class="input-group">
+                            <label for="radarrUrl">URL</label>
+                            <div class="input-row">
+                                <input type="text" id="radarrUrl" placeholder="http://192.168.0.1:7878" value="{radarr_url}">
+                            </div>
                         </div>
-                    </div>
-                    <div class="input-group">
-                        <label for="radarrApiKey">API Key</label>
-                        <div class="input-row">
-                            <input type="text" id="radarrApiKey" placeholder="Radarr API key" value="{radarr_api_key}">
+                        <div class="input-group">
+                            <label for="radarrApiKey">API Key</label>
+                            <div class="input-row">
+                                <input type="text" id="radarrApiKey" placeholder="Radarr API key" value="{radarr_api_key}">
+                            </div>
                         </div>
+                        <div id="radarr-save-status" class="notification-status"></div>
+                        <p>
+                            {render_button("Save Radarr Settings", "primary", {"onclick": "saveRadarrSettings()", "type": "button", "id": "radarrSaveBtn"})}
+                            {render_button("Clear", "secondary", {"onclick": "confirmClearRadarrSettings()", "type": "button", "id": "radarrClearBtn"})}
+                        </p>
                     </div>
-                    <div id="radarr-save-status" class="notification-status"></div>
-                    <p>
-                        {render_button("Save Radarr Settings", "primary", {"onclick": "saveRadarrSettings()", "type": "button", "id": "radarrSaveBtn"})}
-                        {render_button("Clear", "secondary", {"onclick": "confirmClearRadarrSettings()", "type": "button", "id": "radarrClearBtn"})}
-                    </p>
-                </div>
-            </details>
-        </div>
 
-        <div class="section">
-            <details id="sonarrDetails">
-                <summary id="sonarrSummary">📺 Sonarr Configuration</summary>
-                <div class="api-settings">
-                    <p class="api-hint">
-                        Optional. Used by Quasarr to look up series metadata via Sonarr's API.
-                    </p>
-
-                    <div class="input-group">
-                        <label for="sonarrUrl">URL</label>
-                        <div class="input-row">
-                            <input type="text" id="sonarrUrl" placeholder="http://192.168.0.1:8989" value="{sonarr_url}">
+                    <div class="notification-provider-card">
+                        <h4>📺 Sonarr</h4>
+                        <p class="api-hint">Look up series metadata via Sonarr's API.</p>
+                        <div class="input-group">
+                            <label for="sonarrUrl">URL</label>
+                            <div class="input-row">
+                                <input type="text" id="sonarrUrl" placeholder="http://192.168.0.1:8989" value="{sonarr_url}">
+                            </div>
                         </div>
-                    </div>
-                    <div class="input-group">
-                        <label for="sonarrApiKey">API Key</label>
-                        <div class="input-row">
-                            <input type="text" id="sonarrApiKey" placeholder="Sonarr API key" value="{sonarr_api_key}">
+                        <div class="input-group">
+                            <label for="sonarrApiKey">API Key</label>
+                            <div class="input-row">
+                                <input type="text" id="sonarrApiKey" placeholder="Sonarr API key" value="{sonarr_api_key}">
+                            </div>
                         </div>
+                        <div id="sonarr-save-status" class="notification-status"></div>
+                        <p>
+                            {render_button("Save Sonarr Settings", "primary", {"onclick": "saveSonarrSettings()", "type": "button", "id": "sonarrSaveBtn"})}
+                            {render_button("Clear", "secondary", {"onclick": "confirmClearSonarrSettings()", "type": "button", "id": "sonarrClearBtn"})}
+                        </p>
                     </div>
-                    <div id="sonarr-save-status" class="notification-status"></div>
-                    <p>
-                        {render_button("Save Sonarr Settings", "primary", {"onclick": "saveSonarrSettings()", "type": "button", "id": "sonarrSaveBtn"})}
-                        {render_button("Clear", "secondary", {"onclick": "confirmClearSonarrSettings()", "type": "button", "id": "sonarrClearBtn"})}
-                    </p>
                 </div>
             </details>
         </div>
@@ -762,6 +788,9 @@ def get_api(shared_state_dict, shared_state_lock):
             .notification-toggle-grid .notification-toggle-label {{
                 text-align: left;
                 min-width: 0;
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
             }}
             .notification-toggle-grid .notification-toggle-header.toggle-cell,
             .notification-toggle-grid .toggle-cell {{
@@ -779,53 +808,67 @@ def get_api(shared_state_dict, shared_state_lock):
                 justify-content: center;
                 min-height: 24px;
             }}
-            .notification-toggle-grid .notification-toggle-control {{
-                position: relative;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                width: 18px;
-                height: 18px;
-                cursor: pointer;
+            .setting-row-title {{
+                font-weight: 600;
+                font-size: 0.95em;
+                color: var(--fg-color, #212529);
             }}
-            .notification-toggle-grid .notification-toggle-control input {{
+            .setting-row-sub {{
+                font-size: 0.82em;
+                color: var(--text-muted, #666);
+            }}
+            .setting-row-hint {{
+                margin: 12px 2px 0;
+                text-align: left;
+            }}
+            .switch {{
+                position: relative;
+                flex: 0 0 auto;
+                display: inline-block;
+                width: 40px;
+                height: 24px;
+            }}
+            .switch input {{
                 position: absolute;
                 inset: 0;
-                width: 18px;
-                height: 18px;
+                width: 100%;
+                height: 100%;
                 margin: 0;
                 opacity: 0;
                 cursor: pointer;
+                z-index: 1;
             }}
-            .notification-toggle-grid .notification-toggle-box {{
-                position: relative;
-                box-sizing: border-box;
-                display: block;
-                width: 18px;
-                height: 18px;
-                border: 2px solid var(--input-border, #7a7a7a);
-                border-radius: 4px;
-                background: var(--card-bg, #f8f9fa);
-                transition: background-color 0.15s ease, border-color 0.15s ease;
+            .switch-slider {{
+                position: absolute;
+                inset: 0;
+                border-radius: 999px;
+                background: var(--input-border, #adb5bd);
+                transition: background-color 0.2s ease;
             }}
-            .notification-toggle-grid .notification-toggle-control input:checked + .notification-toggle-box {{
-                background: var(--btn-primary-bg, #1a73e8);
-                border-color: var(--btn-primary-bg, #1a73e8);
-            }}
-            .notification-toggle-grid .notification-toggle-control input:checked + .notification-toggle-box::after {{
+            .switch-slider::before {{
                 content: "";
                 position: absolute;
-                left: 5px;
-                top: 1px;
-                width: 4px;
-                height: 9px;
-                border: solid #fff;
-                border-width: 0 2px 2px 0;
-                transform: rotate(45deg);
+                width: 18px;
+                height: 18px;
+                left: 3px;
+                top: 3px;
+                border-radius: 50%;
+                background: #fff;
+                box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+                transition: transform 0.2s ease;
             }}
-            .notification-toggle-grid .notification-toggle-control input:focus-visible + .notification-toggle-box {{
+            .switch input:checked + .switch-slider {{
+                background: var(--btn-primary-bg, #1a73e8);
+            }}
+            .switch input:checked + .switch-slider::before {{
+                transform: translateX(16px);
+            }}
+            .switch input:focus-visible + .switch-slider {{
                 outline: 2px solid var(--link-color, #0066cc);
                 outline-offset: 2px;
+            }}
+            .switch input:disabled {{
+                cursor: default;
             }}
             @media (max-width: 500px) {{
                 .notification-toggle-grid {{
@@ -1445,6 +1488,47 @@ def get_api(shared_state_dict, shared_state_lock):
                     if (saveButton) {{
                         saveButton.disabled = false;
                         saveButton.textContent = 'Save Timeout Settings';
+                    }}
+                }}
+            }}
+
+            async function saveFilecryptSettings() {{
+                var saveButton = document.getElementById('filecryptSaveBtn');
+                var checkbox = document.getElementById('filecrypt-enabled');
+                setNotificationStatus('filecrypt-status', 'Saving filecrypt setting...', true);
+
+                if (saveButton) {{
+                    saveButton.disabled = true;
+                    saveButton.textContent = 'Saving...';
+                }}
+                if (checkbox) {{
+                    checkbox.disabled = true;
+                }}
+
+                try {{
+                    var response = await quasarrApiFetch('/api/filecrypt/settings', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ enabled: !!(checkbox && checkbox.checked) }})
+                    }});
+                    var data = await response.json();
+                    if (!response.ok || !data.success) {{
+                        throw new Error(data.message || 'Failed to save filecrypt setting');
+                    }}
+
+                    if (checkbox) {{
+                        checkbox.checked = !!data.enabled;
+                    }}
+                    setNotificationStatus('filecrypt-status', '✅ ' + data.message, true);
+                }} catch (error) {{
+                    setNotificationStatus('filecrypt-status', '❌ ' + error.message, false);
+                }} finally {{
+                    if (saveButton) {{
+                        saveButton.disabled = false;
+                        saveButton.textContent = 'Save Filecrypt Setting';
+                    }}
+                    if (checkbox) {{
+                        checkbox.disabled = false;
                     }}
                 }}
             }}

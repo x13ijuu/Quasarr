@@ -42,6 +42,7 @@ from quasarr.storage.setup import (
     check_credentials,
     clear_skip_login,
     delete_skip_flaresolverr_preference,
+    get_filecrypt_setting_data,
     get_flaresolverr_status_data,
     get_notification_settings_data,
     get_radarr_settings_data,
@@ -50,6 +51,7 @@ from quasarr.storage.setup import (
     get_timeout_slow_mode_settings_data,
     hostname_form_html,
     import_hostnames_from_url,
+    save_filecrypt_setting,
     save_flaresolverr_url,
     save_hostnames,
     save_jdownloader_settings,
@@ -201,6 +203,16 @@ def setup_config(app, shared_state):
     @require_api_key
     def save_timeout_slow_mode_settings_api():
         return save_timeout_slow_mode_settings(shared_state)
+
+    @app.get("/api/filecrypt/settings")
+    @require_api_key
+    def get_filecrypt_setting_api():
+        return get_filecrypt_setting_data(shared_state)
+
+    @app.post("/api/filecrypt/settings")
+    @require_api_key
+    def save_filecrypt_setting_api():
+        return save_filecrypt_setting(shared_state)
 
     @app.get("/categories")
     def categories_ui():

@@ -20,13 +20,13 @@ All persistent state: the INI config (`Quasarr.ini`) wrapped by `Config` with tr
 - The `Hostnames` section keys are generated from the search source module filenames — adding a source module automatically adds its hostname key. DJ/SJ share the single `JUNKIES` credentials section, and their `skip_login` flags are set/cleared together.
 - `DataBase` tables are untyped `(key, value)` pairs created lazily; there is NO migration framework. `update_store()` is the upsert; `store()` is a plain INSERT and can duplicate keys; `retrieve_all_titles()` returns `None` (not `[]`) when empty. `maintain()` is tri-state at startup: False = corrupt → app exits; None = transient lock → continue; True = ok.
 - Lock ordering invariant (documented in the module docstrings, which must stay accurate): the config lock may be held while acquiring the database lock, never the reverse; `DataBase` methods must never call into `quasarr.storage.config`.
-- Boolean flags in SQLite are stored as strings: `notification_settings` and `timeout_slow_mode` store `'true'`/`'false'`; the `skip_*` tables store only `'true'` and are cleared by deleting the row.
+- Boolean flags in SQLite are stored as strings: `notification_settings`, `timeout_slow_mode`, and `filecrypt_enabled` store `'true'`/`'false'`; the `skip_*` tables store only `'true'` and are cleared by deleting the row.
 - Category DB rows contain only mutable settings (mirrors / search_sources / name / base_type); static metadata like emoji lives in constants and is stripped from rows on read. Custom search category IDs are `100000 + base id`, max 10; download category names are lowercase alnum ≤ 20 chars, max 10 custom.
 - Package-ID parsing: `get_download_category_from_package_id()` depends on the `Quasarr_{category}_{hash}` format from `constants.PACKAGE_ID_PATTERN`.
 
 ## Work Guidance
 
-- Settings read from disk are pushed into shared_state (`notification_settings`, `timeout_slow_mode`) and consumers read shared_state, not disk — keep that refresh-then-cache pattern.
+- Settings read from disk are pushed into shared_state (`notification_settings`, `timeout_slow_mode`, `filecrypt_enabled`) and consumers read shared_state, not disk — keep that refresh-then-cache pattern.
 
 ## Verification
 
