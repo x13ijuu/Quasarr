@@ -395,6 +395,9 @@ PROTECTED_PATTERNS = {
     "keeplinks": re.compile(r"keeplinks\.", re.IGNORECASE),
 }
 
+# Table storing the filecrypt kill switch flag.
+FILECRYPT_ENABLED_TABLE = "filecrypt_enabled"
+
 
 # ==============================================================================
 # QUASARR PACKAGE MANAGEMENT

@@ -18,6 +18,9 @@ Alternatively, follow the link from the console output (or notification) to solv
 Quasarr will confidently handle the rest. Some CAPTCHA types require [Tampermonkey](https://www.tampermonkey.net/) to be
 installed in your browser.
 
+If a link crypter's CAPTCHAs become temporarily unsolvable, you can disable it under **Web UI → Link Protection**.
+Affected releases then fail so your *arr app grabs an alternative instead of stalling.
+
 # Instructions
 
 1. Set up and run [JDownloader 2](https://jdownloader.org/download/index)
@@ -219,7 +222,7 @@ Configure notifications in **Web UI → Notifications Configuration**:
 
 1. Open your Discord server and go to **Server Settings → Integrations → Webhooks**.
 2. Click **New Webhook**, choose the target channel, and copy the **Webhook URL**.
-3. Open Quasarr UI and go to **Notifications Configuration**.
+3. Open Quasarr UI and go to **Notifications**.
 4. Paste the webhook URL into **Discord → Webhook URL**.
 5. Click **Save Notification Settings** and then **Send Discord Test**.
 
@@ -239,7 +242,7 @@ Configure notifications in **Web UI → Notifications Configuration**:
    ```
    Look for `"chat":{"id":` in the JSON response. That number is your `TELEGRAM_CHAT_ID`.
    > **Tip:** For a group chat, add the bot to the group first, send a message in the group, then call `getUpdates`.
-5. **Configure Quasarr** — Open **Notifications Configuration** in Quasarr UI.
+5. **Configure Quasarr** — Open **Notifications** in Quasarr UI.
 6. Paste both values into **Telegram → Bot Token / Chat ID**.
 7. Click **Save Notification Settings** and then **Send Telegram Test**.
   
