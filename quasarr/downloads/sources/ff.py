@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 
 from quasarr.constants import DOWNLOAD_REQUEST_TIMEOUT_SECONDS
 from quasarr.downloads.sources.helpers.abstract_source import AbstractDownloadSource
+from quasarr.providers.cloudflare import LazyFlareSolverrSession
 from quasarr.providers.hostname_issues import mark_hostname_issue
 from quasarr.providers.log import debug, info
 from quasarr.providers.utils import detect_crypter_type
@@ -19,6 +20,17 @@ class Source(AbstractDownloadSource):
     initials = "ff"
 
     def get_download_links(self, shared_state, url, mirrors, title, password):
+        cf_session = LazyFlareSolverrSession(shared_state)
+        try:
+            return self._get_download_links(
+                shared_state, url, mirrors, title, password, cf_session
+            )
+        finally:
+            cf_session.close()
+
+    def _get_download_links(
+        self, shared_state, url, mirrors, title, password, cf_session
+    ):
         host = shared_state.values["config"]("Hostnames").get(Source.initials)
         user_agent = shared_state.values["user_agent"]
 
@@ -36,8 +48,11 @@ class Source(AbstractDownloadSource):
 
         try:
             headers = {"User-Agent": user_agent}
-            r = requests.get(
-                url, headers=headers, timeout=DOWNLOAD_REQUEST_TIMEOUT_SECONDS
+            r = cf_session.get(
+                url,
+                headers,
+                DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
+                request_get=requests.get,
             )
             r.raise_for_status()
             page = r.text
@@ -54,10 +69,11 @@ class Source(AbstractDownloadSource):
             if not token_match:
                 return {"links": [], "imdb_id": imdb_id}
 
-            r = requests.get(
+            r = cf_session.get(
                 f"https://{host}/api/v1/{token_match.group(1)}?filter=",
-                headers=headers,
-                timeout=DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
+                headers,
+                DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
+                request_get=requests.get,
             )
             r.raise_for_status()
             content = BeautifulSoup(r.json().get("html", ""), "html.parser")

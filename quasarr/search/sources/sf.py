@@ -17,6 +17,7 @@ from quasarr.constants import (
     SEARCH_REQUEST_TIMEOUT_SECONDS,
 )
 from quasarr.providers import shared_state
+from quasarr.providers.cloudflare import LazyFlareSolverrSession
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
 from quasarr.providers.imdb_metadata import get_localized_title
 from quasarr.providers.log import debug, info, trace, warn
@@ -43,6 +44,13 @@ class Source(AbstractSearchSource):
     def feed(
         self, shared_state: shared_state, start_time: float, search_category: str
     ) -> list[SearchRelease]:
+        cf_session = LazyFlareSolverrSession(shared_state)
+        try:
+            return self._feed(shared_state, start_time, search_category, cf_session)
+        finally:
+            cf_session.close()
+
+    def _feed(self, shared_state, start_time, search_category, cf_session):
         releases = []
         sf = shared_state.values["config"]("Hostnames").get(self.initials)
         password = check(sf)
@@ -60,10 +68,11 @@ class Source(AbstractSearchSource):
             date -= timedelta(days=1)
 
             try:
-                r = requests.get(
+                r = cf_session.get(
                     f"https://{sf}/updates/{formatted_date}#list",
                     headers,
-                    timeout=FEED_REQUEST_TIMEOUT_SECONDS,
+                    FEED_REQUEST_TIMEOUT_SECONDS,
+                    request_get=requests.get,
                 )
                 r.raise_for_status()
             except Exception as e:
@@ -149,6 +158,30 @@ class Source(AbstractSearchSource):
         season: int = None,
         episode: int = None,
     ) -> list[SearchRelease]:
+        cf_session = LazyFlareSolverrSession(shared_state)
+        try:
+            return self._search(
+                shared_state,
+                start_time,
+                search_category,
+                search_string,
+                season,
+                episode,
+                cf_session,
+            )
+        finally:
+            cf_session.close()
+
+    def _search(
+        self,
+        shared_state,
+        start_time,
+        search_category,
+        search_string,
+        season,
+        episode,
+        cf_session,
+    ):
         releases = []
         sf = shared_state.values["config"]("Hostnames").get(self.initials)
         password = check(sf)
@@ -170,10 +203,11 @@ class Source(AbstractSearchSource):
         headers = {"User-Agent": shared_state.values["user_agent"]}
 
         try:
-            r = requests.get(
+            r = cf_session.get(
                 url,
-                headers=headers,
-                timeout=SEARCH_REQUEST_TIMEOUT_SECONDS,
+                headers,
+                SEARCH_REQUEST_TIMEOUT_SECONDS,
+                request_get=requests.get,
             )
             r.raise_for_status()
             feed = r.json()
@@ -221,10 +255,11 @@ class Source(AbstractSearchSource):
                 # load series page
                 series_url = f"https://{sf}/{series_id}"
                 try:
-                    r = requests.get(
+                    r = cf_session.get(
                         series_url,
-                        headers=headers,
-                        timeout=SEARCH_REQUEST_TIMEOUT_SECONDS,
+                        headers,
+                        SEARCH_REQUEST_TIMEOUT_SECONDS,
+                        request_get=requests.get,
                     )
                     r.raise_for_status()
                     series_page = r.text
@@ -249,10 +284,11 @@ class Source(AbstractSearchSource):
                 )
                 trace(f"Requesting SF API URL: {api_url}")
                 try:
-                    r = requests.get(
+                    r = cf_session.get(
                         api_url,
-                        headers=headers,
-                        timeout=SEARCH_REQUEST_TIMEOUT_SECONDS,
+                        headers,
+                        SEARCH_REQUEST_TIMEOUT_SECONDS,
+                        request_get=requests.get,
                     )
                     r.raise_for_status()
                     resp_json = r.json()

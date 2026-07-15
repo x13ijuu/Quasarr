@@ -2,10 +2,12 @@
 
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from quasarr.downloads.sources.ff import Source as FfDownloadSource
+from quasarr.providers.cloudflare import FlareSolverrResponse, LazyFlareSolverrSession
 from quasarr.search.sources.ff import Source as FfSearchSource
+from quasarr.search.sources.sf import Source as SfSearchSource
 
 
 class FakeResponse:
@@ -194,6 +196,303 @@ class FfSourceTests(unittest.TestCase):
             result,
         )
         self.assertEqual([(external_url, False)], requested_urls)
+
+
+class FfSfCloudflareTests(unittest.TestCase):
+    source_cases = (
+        ("ff", FfSearchSource),
+        ("sf", SfSearchSource),
+    )
+
+    def test_flaresolverr_response_supports_json_api_payloads(self):
+        payload = '{"result": [{"url_id": "synthetic-id"}]}'
+        for body in (payload, f"<html><body><pre>{payload}</pre></body></html>"):
+            with self.subTest(wrapped=body.startswith("<html>")):
+                response = FlareSolverrResponse(
+                    "https://source.invalid/api",
+                    200,
+                    {"Content-Type": "application/json"},
+                    body,
+                )
+
+                self.assertEqual(
+                    {"result": [{"url_id": "synthetic-id"}]},
+                    response.json(),
+                )
+
+    def test_search_keeps_plain_response_without_flaresolverr(self):
+        for initials, source_class in self.source_cases:
+            with self.subTest(source=initials):
+                host = f"host-{initials}.invalid"
+                response = FakeResponse(
+                    f"https://{host}/api/v2/search",
+                    json_data={"result": []},
+                )
+                with (
+                    patch(
+                        f"quasarr.search.sources.{initials}.requests.get",
+                        return_value=response,
+                    ) as plain_get,
+                    patch(
+                        "quasarr.providers.cloudflare.is_flaresolverr_available"
+                    ) as is_available,
+                    patch(
+                        "quasarr.providers.cloudflare.flaresolverr_create_session"
+                    ) as create_session,
+                    patch(
+                        "quasarr.providers.cloudflare.flaresolverr_get"
+                    ) as flaresolverr_get,
+                    patch(
+                        "quasarr.providers.cloudflare.flaresolverr_destroy_session"
+                    ) as destroy_session,
+                ):
+                    result = source_class().search(
+                        _build_shared_state({initials: host}),
+                        time.time(),
+                        2000 if initials == "ff" else 5000,
+                        "Synthetic Title",
+                    )
+
+                self.assertEqual([], result)
+                plain_get.assert_called_once()
+                is_available.assert_not_called()
+                create_session.assert_not_called()
+                flaresolverr_get.assert_not_called()
+                destroy_session.assert_not_called()
+
+    def test_search_retries_cloudflare_challenge_with_flaresolverr(self):
+        challenge_html = """
+        <html>
+          <title>Just a moment...</title>
+          <form id="challenge-form"></form>
+        </html>
+        """
+        for initials, source_class in self.source_cases:
+            with self.subTest(source=initials):
+                host = f"host-{initials}.invalid"
+                request_url = f"https://{host}/api/v2/search"
+                challenged = FakeResponse(
+                    request_url,
+                    text=challenge_html,
+                    status_code=403,
+                )
+                solved = FakeResponse(request_url, json_data={"result": []})
+                with (
+                    patch(
+                        f"quasarr.search.sources.{initials}.requests.get",
+                        return_value=challenged,
+                    ) as plain_get,
+                    patch(
+                        "quasarr.providers.cloudflare.is_flaresolverr_available",
+                        return_value=True,
+                    ),
+                    patch(
+                        "quasarr.providers.cloudflare.flaresolverr_create_session",
+                        return_value="test-session",
+                    ) as create_session,
+                    patch(
+                        "quasarr.providers.cloudflare.flaresolverr_get",
+                        return_value=solved,
+                    ) as flaresolverr_get,
+                    patch(
+                        "quasarr.providers.cloudflare.flaresolverr_destroy_session"
+                    ) as destroy_session,
+                ):
+                    result = source_class().search(
+                        _build_shared_state({initials: host}),
+                        time.time(),
+                        2000 if initials == "ff" else 5000,
+                        "Synthetic Title",
+                    )
+
+                self.assertEqual([], result)
+                plain_get.assert_called_once()
+                flaresolverr_get.assert_called_once()
+                create_session.assert_called_once()
+                self.assertEqual(
+                    "test-session", flaresolverr_get.call_args.kwargs["session_id"]
+                )
+                destroy_session.assert_called_once_with(ANY, "test-session")
+
+    def test_blocked_search_without_flaresolverr_reports_normal_failure(self):
+        challenge_html = "<title>Just a moment...</title>"
+        for initials, source_class in self.source_cases:
+            with self.subTest(source=initials):
+                host = f"host-{initials}.invalid"
+                challenged = FakeResponse(
+                    f"https://{host}/api/v2/search",
+                    text=challenge_html,
+                    status_code=403,
+                )
+                with (
+                    patch(
+                        f"quasarr.search.sources.{initials}.requests.get",
+                        return_value=challenged,
+                    ),
+                    patch(
+                        "quasarr.providers.cloudflare.is_flaresolverr_available",
+                        return_value=False,
+                    ),
+                    patch(
+                        "quasarr.providers.cloudflare.flaresolverr_create_session"
+                    ) as create_session,
+                    patch(
+                        "quasarr.providers.cloudflare.flaresolverr_get"
+                    ) as flaresolverr_get,
+                    patch(
+                        "quasarr.providers.cloudflare.flaresolverr_destroy_session"
+                    ) as destroy_session,
+                    patch(
+                        f"quasarr.search.sources.{initials}.mark_hostname_issue"
+                    ) as mark_issue,
+                ):
+                    result = source_class().search(
+                        _build_shared_state({initials: host}),
+                        time.time(),
+                        2000 if initials == "ff" else 5000,
+                        "Synthetic Title",
+                    )
+
+                self.assertEqual([], result)
+                mark_issue.assert_called_once()
+                create_session.assert_not_called()
+                flaresolverr_get.assert_not_called()
+                destroy_session.assert_not_called()
+
+    def test_lazy_session_reuses_one_flaresolverr_session(self):
+        shared_state = _build_shared_state({})
+        headers = {"User-Agent": "UnitTestAgent/1.0"}
+        challenged = FakeResponse(
+            "https://source.invalid/page",
+            text="<title>Just a moment...</title>",
+            status_code=403,
+        )
+        solved = FakeResponse("https://source.invalid/page", text="<html>ok</html>")
+        plain_get = MagicMock(return_value=challenged)
+
+        with (
+            patch(
+                "quasarr.providers.cloudflare.is_flaresolverr_available",
+                return_value=True,
+            ),
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_create_session",
+                return_value="reused-session",
+            ) as create_session,
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_get",
+                return_value=solved,
+            ) as flaresolverr_get,
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_destroy_session"
+            ) as destroy_session,
+        ):
+            session = LazyFlareSolverrSession(shared_state)
+            try:
+                session.get(
+                    "https://source.invalid/first",
+                    headers,
+                    10,
+                    request_get=plain_get,
+                )
+                session.get(
+                    "https://source.invalid/second",
+                    headers,
+                    10,
+                    request_get=plain_get,
+                )
+            finally:
+                session.close()
+
+        create_session.assert_called_once()
+        self.assertEqual(2, flaresolverr_get.call_count)
+        self.assertEqual(
+            ["reused-session", "reused-session"],
+            [call.kwargs["session_id"] for call in flaresolverr_get.call_args_list],
+        )
+        destroy_session.assert_called_once_with(shared_state, "reused-session")
+
+    def test_download_early_return_destroys_lazy_session(self):
+        host = "host-ff.invalid"
+        release_url = f"https://{host}/synthetic-release"
+        challenged = FakeResponse(
+            release_url,
+            text="<title>Just a moment...</title>",
+            status_code=403,
+        )
+        solved = FakeResponse(release_url, text="<html>no movie token</html>")
+
+        with (
+            patch(
+                "quasarr.downloads.sources.ff.requests.get",
+                return_value=challenged,
+            ),
+            patch(
+                "quasarr.providers.cloudflare.is_flaresolverr_available",
+                return_value=True,
+            ),
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_create_session",
+                return_value="download-session",
+            ),
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_get",
+                return_value=solved,
+            ),
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_destroy_session"
+            ) as destroy_session,
+        ):
+            result = FfDownloadSource().get_download_links(
+                _build_shared_state({"ff": host}),
+                release_url,
+                [],
+                "Synthetic.Release.1080p-GROUP",
+                None,
+            )
+
+        self.assertEqual({"links": [], "imdb_id": None}, result)
+        destroy_session.assert_called_once_with(ANY, "download-session")
+
+    def test_search_exception_destroys_lazy_session(self):
+        host = "host-sf.invalid"
+        challenged = FakeResponse(
+            f"https://{host}/api/v2/search",
+            text="<title>Just a moment...</title>",
+            status_code=403,
+        )
+
+        with (
+            patch(
+                "quasarr.search.sources.sf.requests.get",
+                return_value=challenged,
+            ),
+            patch(
+                "quasarr.providers.cloudflare.is_flaresolverr_available",
+                return_value=True,
+            ),
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_create_session",
+                return_value="failed-session",
+            ),
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_get",
+                side_effect=RuntimeError("synthetic solver failure"),
+            ),
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_destroy_session"
+            ) as destroy_session,
+            patch("quasarr.search.sources.sf.mark_hostname_issue"),
+        ):
+            result = SfSearchSource().search(
+                _build_shared_state({"sf": host}),
+                time.time(),
+                5000,
+                "Synthetic Title",
+            )
+
+        self.assertEqual([], result)
+        destroy_session.assert_called_once_with(ANY, "failed-session")
 
 
 if __name__ == "__main__":

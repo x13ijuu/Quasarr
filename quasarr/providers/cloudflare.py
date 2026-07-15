@@ -2,7 +2,9 @@
 # Quasarr
 # Project by https://github.com/rix1337
 
+import json
 import urllib.parse
+import uuid
 
 import requests
 from bs4 import BeautifulSoup
@@ -41,6 +43,61 @@ def is_cloudflare_challenge(html: str) -> bool:
         return True
 
     return False
+
+
+class LazyFlareSolverrSession:
+    """Lazily create and reuse one FlareSolverr session for an operation."""
+
+    def __init__(self, shared_state):
+        self.shared_state = shared_state
+        self.session_id = None
+
+    def get(self, url, headers, timeout, request_get=requests.get):
+        response = request_get(url, headers=headers, timeout=timeout)
+        if response.status_code != 403 and not is_cloudflare_challenge(response.text):
+            return response
+
+        if not is_flaresolverr_available(self.shared_state):
+            raise requests.RequestException(
+                "Cloudflare protection detected but FlareSolverr is not configured"
+            )
+
+        if self.session_id is None:
+            requested_session_id = str(uuid.uuid4())
+            self.session_id = flaresolverr_create_session(
+                self.shared_state, requested_session_id
+            )
+            if not self.session_id:
+                raise requests.RequestException(
+                    "Could not create FlareSolverr session for Cloudflare bypass"
+                )
+
+        debug("Encountered Cloudflare protection. Retrying with FlareSolverr...")
+        response = flaresolverr_get(
+            self.shared_state,
+            url,
+            timeout=timeout,
+            session_id=self.session_id,
+        )
+        if (
+            response is None
+            or response.status_code == 403
+            or is_cloudflare_challenge(response.text)
+        ):
+            raise requests.RequestException(
+                "Could not bypass Cloudflare protection with FlareSolverr"
+            )
+        if user_agent := self.shared_state.values.get("user_agent"):
+            headers["User-Agent"] = user_agent
+        return response
+
+    def close(self):
+        if self.session_id is None:
+            return
+        try:
+            flaresolverr_destroy_session(self.shared_state, self.session_id)
+        finally:
+            self.session_id = None
 
 
 def update_session_via_flaresolverr(
@@ -190,6 +247,15 @@ class FlareSolverrResponse:
     def raise_for_status(self):
         if 400 <= self.status_code:
             raise requests.HTTPError(f"{self.status_code} Error at {self.url}")
+
+    def json(self):
+        try:
+            return json.loads(self.text)
+        except json.JSONDecodeError:
+            pre = BeautifulSoup(self.text, "html.parser").find("pre")
+            if pre is None:
+                raise
+            return json.loads(pre.get_text())
 
 
 def flaresolverr_get(
