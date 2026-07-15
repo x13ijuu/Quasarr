@@ -1,0 +1,93 @@
+# auto-rebase.yml — hält die maja-Linie automatisch auf dem neuesten Upstream-Release.
+#
+# Täglich (06:00 UTC): neuestes rix1337/Quasarr-Release-Tag vs. __version__ auf
+# maja/main. Ist Upstream neuer: Merge + MAJA_PATCH_LEVEL-Bump + volle Testsuite.
+#   * Merge sauber + Tests grün  -> direkter Push auf maja/main (Release-Fork-CI
+#     baut das Image ghcr.io/x13ijuu/quasarr:<ver>-maja.<n>); den RepoInfra-Bump
+#     übernimmt Renovate (custom versioning), Deploy der media-stack ist dort
+#     path-gefiltert automatisiert.
+#   * Konflikt ODER Tests rot    -> Branch + PR (Mensch entscheidet), kein Push.
+# Manuell anstoßbar via workflow_dispatch.
+name: Auto Rebase Upstream
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: maja/main
+          fetch-depth: 0
+
+      - name: Detect upstream release
+        id: up
+        run: |
+          set -euo pipefail
+          latest="$(curl -sf https://api.github.com/repos/rix1337/Quasarr/releases/latest | jq -r .tag_name)"   # z.B. v.4.6.4
+          upver="${latest#v.}"
+          cur="$(grep -oP '__version__ = "\K[^"]+' quasarr/providers/version.py)"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "upver=$upver"   >> "$GITHUB_OUTPUT"
+          echo "cur=$cur"       >> "$GITHUB_OUTPUT"
+          if [ "$upver" = "$cur" ]; then echo "action=none" >> "$GITHUB_OUTPUT";
+          else echo "action=rebase" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Merge upstream + bump patch level
+        id: merge
+        if: steps.up.outputs.action == 'rebase'
+        run: |
+          set -euo pipefail
+          git config user.name "maja-auto-rebase"
+          git config user.email "maja-auto-rebase@users.noreply.github.com"
+          git remote add upstream https://github.com/rix1337/Quasarr.git
+          git fetch upstream tag "${{ steps.up.outputs.latest }}" --no-tags
+          if git merge --no-ff "${{ steps.up.outputs.latest }}" \
+               -m "merge: upstream ${{ steps.up.outputs.latest }} into maja line (auto-rebase)"; then
+            n="$(grep -oP 'MAJA_PATCH_LEVEL = \K[0-9]+' quasarr/providers/version.py)"
+            sed -i "s/^MAJA_PATCH_LEVEL = ${n}$/MAJA_PATCH_LEVEL = $((n+1))/" quasarr/providers/version.py
+            git commit -am "chore(fork): maja.$((n+1)) — auto-rebase onto ${{ steps.up.outputs.latest }}"
+            echo "state=merged" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "state=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install uv
+        if: steps.merge.outputs.state == 'merged'
+        uses: astral-sh/setup-uv@v5
+
+      - name: Test suite (gate)
+        id: tests
+        if: steps.merge.outputs.state == 'merged'
+        continue-on-error: true
+        run: uv run --with pytest python -m pytest tests/ -q
+
+      - name: Push to maja/main (clean merge + green tests)
+        if: steps.merge.outputs.state == 'merged' && steps.tests.outcome == 'success'
+        run: git push origin maja/main
+
+      - name: Open PR instead (conflict or red tests)
+        if: steps.up.outputs.action == 'rebase' && (steps.merge.outputs.state == 'conflict' || steps.tests.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          b="maja/auto-rebase-${{ steps.up.outputs.upver }}"
+          git checkout -B "$b"
+          if [ "${{ steps.merge.outputs.state }}" = "conflict" ]; then
+            git merge "${{ steps.up.outputs.latest }}" || true
+            git add -A && git commit -m "wip: auto-rebase ${{ steps.up.outputs.latest }} (KONFLIKTE — manuell lösen)" || true
+          fi
+          git push -f origin "$b"
+          gh pr create --base maja/main --head "$b" \
+            --title "auto-rebase: upstream ${{ steps.up.outputs.latest }} braucht Hand" \
+            --body "Automatischer Rebase gescheitert: ${{ steps.merge.outputs.state == 'conflict' && 'Merge-Konflikt' || 'Tests rot' }}. Bitte manuell lösen — Muster: x13ijuu/Quasarr#1/#2." \
+            || echo "PR existiert vermutlich schon"
