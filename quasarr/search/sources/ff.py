@@ -20,6 +20,7 @@ from quasarr.constants import (
     SEARCH_REQUEST_TIMEOUT_SECONDS,
 )
 from quasarr.providers import shared_state
+from quasarr.providers.cloudflare import LazyFlareSolverrSession
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
 from quasarr.providers.imdb_metadata import get_localized_title
 from quasarr.providers.log import debug, info, trace, warn
@@ -50,6 +51,13 @@ class Source(AbstractSearchSource):
     def feed(
         self, shared_state: shared_state, start_time: float, search_category: str
     ) -> list[SearchRelease]:
+        cf_session = LazyFlareSolverrSession(shared_state)
+        try:
+            return self._feed(shared_state, start_time, search_category, cf_session)
+        finally:
+            cf_session.close()
+
+    def _feed(self, shared_state, start_time, search_category, cf_session):
         releases = []
         host = shared_state.values["config"]("Hostnames").get(self.initials)
         password = host
@@ -71,10 +79,11 @@ class Source(AbstractSearchSource):
                 break
 
             try:
-                r = requests.get(
+                r = cf_session.get(
                     f"https://{host}/updates/{formatted_date}#list",
-                    headers=headers,
-                    timeout=timeout,
+                    headers,
+                    timeout,
+                    request_get=requests.get,
                 )
                 r.raise_for_status()
             except Exception as e:
@@ -113,6 +122,7 @@ class Source(AbstractSearchSource):
                         host,
                         movie_path.strip("/"),
                         headers,
+                        cf_session,
                         start_time=start_time,
                         feed=True,
                     )
@@ -179,6 +189,36 @@ class Source(AbstractSearchSource):
         episode_month: int = None,
         episode_day: int = None,
     ) -> list[SearchRelease]:
+        cf_session = LazyFlareSolverrSession(shared_state)
+        try:
+            return self._search(
+                shared_state,
+                start_time,
+                search_category,
+                search_string,
+                season,
+                episode,
+                episode_year,
+                episode_month,
+                episode_day,
+                cf_session,
+            )
+        finally:
+            cf_session.close()
+
+    def _search(
+        self,
+        shared_state,
+        start_time,
+        search_category,
+        search_string,
+        season,
+        episode,
+        episode_year,
+        episode_month,
+        episode_day,
+        cf_session,
+    ):
         releases = []
         host = shared_state.values["config"]("Hostnames").get(self.initials)
         password = host
@@ -195,10 +235,11 @@ class Source(AbstractSearchSource):
         url = f"https://{host}/api/v2/search?q={quote_plus(search_string)}&ql=DE"
 
         try:
-            r = requests.get(
+            r = cf_session.get(
                 url,
-                headers=headers,
-                timeout=SEARCH_REQUEST_TIMEOUT_SECONDS,
+                headers,
+                SEARCH_REQUEST_TIMEOUT_SECONDS,
+                request_get=requests.get,
             )
             r.raise_for_status()
             feed = r.json()
@@ -230,6 +271,7 @@ class Source(AbstractSearchSource):
                 host,
                 movie_id,
                 headers,
+                cf_session,
             )
             if not movie_data:
                 continue
@@ -291,6 +333,7 @@ def _load_movie_data(
     host,
     movie_id,
     headers,
+    cf_session,
     start_time=None,
     feed=False,
 ):
@@ -312,7 +355,12 @@ def _load_movie_data(
 
     movie_url = f"https://{host}/{movie_id}"
     try:
-        r = requests.get(movie_url, headers=headers, timeout=timeout)
+        r = cf_session.get(
+            movie_url,
+            headers,
+            timeout,
+            request_get=requests.get,
+        )
         r.raise_for_status()
         movie_page = r.text
     except Exception as e:
@@ -337,10 +385,11 @@ def _load_movie_data(
         return None
 
     try:
-        r = requests.get(
+        r = cf_session.get(
             f"https://{host}/api/v1/{token_match.group(1)}?filter=",
-            headers=headers,
-            timeout=timeout,
+            headers,
+            timeout,
+            request_get=requests.get,
         )
         r.raise_for_status()
         data_html = r.json().get("html", "")

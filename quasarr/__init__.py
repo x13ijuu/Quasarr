@@ -455,6 +455,15 @@ def update_checker(shared_state_dict, shared_state_lock):
     try:
         shared_state.set_state(shared_state_dict, shared_state_lock)
 
+        # maja-Fork: Updates kommen über die Auto-Rebase-Pipeline
+        # (.github/workflows/auto-rebase.yml) — der Upstream-Banner ist hier nur
+        # Rauschen und feuert bei JEDEM rix1337-Release. Default AUS; mit
+        # QUASARR_UPDATE_CHECK=1 reaktivierbar (z.B. falls die Pipeline stirbt).
+        import os
+        if os.environ.get("QUASARR_UPDATE_CHECK", "0") != "1":
+            info("Update-Check deaktiviert (maja-Fork: Auto-Rebase-Pipeline verwaltet Upstream-Releases)")
+            return
+
         message = "!!! UPDATE AVAILABLE !!!"
         link = "https://github.com/rix1337/Quasarr/releases/latest"
 

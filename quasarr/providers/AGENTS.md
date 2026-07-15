@@ -17,7 +17,7 @@ The shared-services layer consumed by every other subsystem: cross-process state
 - `statistics.py` — DB-backed counters, constructed inline at call sites
 - `version.py` — `__version__`, the single source of version truth
 - `obfuscated.py` — obfuscated userscripts and captcha-service endpoint values; consumed only by `api/captcha`
-- `cloudflare.py` — challenge detection, `ensure_session_cf_bypassed`, FlareSolverr get/post/session helpers
+- `cloudflare.py` — challenge detection, lazy per-operation FlareSolverr fallback, response wrappers, and get/post/session helpers
 - `html_templates.py` / `html_images.py` — UI page shell, base64 image constants, and language-flag emoji/SVG fallback assets for setup UI
 - `hostname_issues.py` — DB-backed source health tracker (`mark_/clear_/get_hostname_issue`)
 - `utils.py` — grab-bag: payload generate/parse, category resolvers, title matching (including shared date-numbering parsing/query/match/canonicalization), online-status checks, `download_package` (the JD linkgrabber submission)
@@ -30,6 +30,7 @@ The shared-services layer consumed by every other subsystem: cross-process state
 - `generate_download_link` and `parse_payload` must stay in sync: urlsafe-base64 of exactly 6 pipe-separated fields (`title|url|size_mb|password|imdb_id|source_key`). This is the bridge between search results and the `/download/` endpoint.
 - Auth: after `add_auth_hook`, every route defaults to browser auth; exceptions are marked with the decorators; `audit_route_auth_modes` raises at startup for unguarded API-prefixed routes; the API key lives in `Config('API')`.
 - FlareSolverr: always check `utils.is_flaresolverr_available(shared_state)` first; when a FlareSolverr solution returns a userAgent, update shared_state `user_agent` globally.
+- Optional Cloudflare fallback uses `LazyFlareSolverrSession`: every request tries plain HTTP first; only a 403 or recognized challenge may lazily create a browser session. Reuse that session within one search/feed/download operation and close it from an outer `finally`. Solved JSON endpoints may arrive inside a browser-rendered `<pre>` wrapper, which `FlareSolverrResponse.json()` unwraps.
 - DB tables owned here: `sessions`, `hostname_issues`, `imdb_metadata`, `imdb_searches`, `xem_all_names`, `xem_season_names`, `statistics`.
 
 ## Work Guidance

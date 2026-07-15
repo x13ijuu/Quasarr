@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 
 from quasarr.constants import DOWNLOAD_REQUEST_TIMEOUT_SECONDS
 from quasarr.downloads.sources.helpers.abstract_source import AbstractDownloadSource
+from quasarr.providers.cloudflare import LazyFlareSolverrSession
 from quasarr.providers.hostname_issues import mark_hostname_issue
 from quasarr.providers.log import debug, info
 from quasarr.providers.utils import detect_crypter_type
@@ -20,6 +21,17 @@ class Source(AbstractDownloadSource):
     initials = "sf"
 
     def get_download_links(self, shared_state, url, mirrors, title, password):
+        cf_session = LazyFlareSolverrSession(shared_state)
+        try:
+            return self._get_download_links(
+                shared_state, url, mirrors, title, password, cf_session
+            )
+        finally:
+            cf_session.close()
+
+    def _get_download_links(
+        self, shared_state, url, mirrors, title, password, cf_session
+    ):
         """
         SF source handler - resolves redirects and returns filecrypt links.
         """
@@ -62,10 +74,11 @@ class Source(AbstractDownloadSource):
                 season = "ALL"
 
             headers = {"User-Agent": user_agent}
-            r = requests.get(
+            r = cf_session.get(
                 url,
-                headers=headers,
-                timeout=DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
+                headers,
+                DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
+                request_get=requests.get,
             )
             r.raise_for_status()
             series_page = r.text
@@ -91,10 +104,11 @@ class Source(AbstractDownloadSource):
                 + epoch
             )
 
-            r = requests.get(
+            r = cf_session.get(
                 api_url,
-                headers=headers,
-                timeout=DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
+                headers,
+                DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
+                request_get=requests.get,
             )
             r.raise_for_status()
             try:
@@ -109,10 +123,11 @@ class Source(AbstractDownloadSource):
                     + "/season/ALL?lang=ALL&_="
                     + epoch
                 )
-                r = requests.get(
+                r = cf_session.get(
                     api_url,
-                    headers=headers,
-                    timeout=DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
+                    headers,
+                    DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
+                    request_get=requests.get,
                 )
                 r.raise_for_status()
                 data = r.json()["html"]
@@ -196,8 +211,8 @@ class Source(AbstractDownloadSource):
                         return {"links": [], "imdb_id": imdb_id}
                 except:
                     continue
-        except:
-            pass
+        except Exception as e:
+            mark_hostname_issue(Source.initials, "download", str(e))
 
         return {"links": [], "imdb_id": None}
 
