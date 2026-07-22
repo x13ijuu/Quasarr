@@ -50,6 +50,42 @@ def package_at_destination(save_to, completed_dir):
     return os.path.isdir(final_path), final_path
 
 
+def downloader_working_dir():
+    """
+    Opt-in root of the downloader's working directory as seen from THIS process
+    (Maja fork, F5b). Must point at the same tree the downloader writes to
+    (e.g. JDownloader's /staging bind-mounted read-only into this container).
+    Unset -> the source-gone check is disabled.
+    """
+    d = os.environ.get("DOWNLOADER_WORKING_DIR", "").strip().rstrip("/")
+    return d or None
+
+
+def package_source_gone(save_to):
+    """
+    True only when we can PROVE the downloader's working copy of the package is
+    gone: DOWNLOADER_WORKING_DIR is configured, visible on this filesystem,
+    save_to lies inside it, and the package folder is missing or holds no files.
+    Anything unknown (unset env, unmounted dir, foreign path) returns False so a
+    finished package conservatively stays "Moving" — exactly the pre-F5b behaviour.
+    """
+    root = downloader_working_dir()
+    if not root or not save_to:
+        return False
+    save_to = save_to.rstrip("/")
+    if save_to == root or not save_to.startswith(root + "/"):
+        return False
+    if not os.path.isdir(root):
+        # Working dir not visible here (mount missing) -> cannot judge.
+        return False
+    if not os.path.isdir(save_to):
+        return True
+    for _dirpath, _dirnames, filenames in os.walk(save_to):
+        if filenames:
+            return False
+    return True
+
+
 def is_extraction_complete(status):
     """Check if a JDownloader status string indicates extraction is complete (case-insensitive)."""
     if not status:
@@ -619,6 +655,16 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                 )
                 if present:
                     final_storage = final_path  # report the real, importable path
+                elif package_source_gone(package.get("saveTo", "")):
+                    # F5b: source files are gone from the downloader's working dir
+                    # AND the destination copy is gone too -> the mover moved them,
+                    # the *arr imported, and cleanup removed the folder. The cycle
+                    # is over; report Completed (history) instead of keeping an
+                    # immortal "Moving" zombie in the queue.
+                    trace(
+                        f"Package '{package_name}' finished, gone from working dir "
+                        f"and destination -> treating as Completed (F5b)"
+                    )
                 else:
                     moving = True  # finished downloading, not yet at destination
 

@@ -3,6 +3,8 @@
 # Project by https://github.com/rix1337
 
 import json
+import threading
+import time
 import urllib.parse
 import uuid
 
@@ -13,7 +15,7 @@ from quasarr.constants import (
     DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
     SESSION_REQUEST_TIMEOUT_SECONDS,
 )
-from quasarr.providers.log import debug
+from quasarr.providers.log import debug, info
 from quasarr.providers.utils import is_flaresolverr_available
 
 
@@ -415,22 +417,61 @@ def flaresolverr_create_session(shared_state, session_id=None):
             return data.get("session")
     except Exception:
         pass
+
+    # The create request failed from our point of view — but FlareSolverr may
+    # still be busy starting the browser and will register the session once it
+    # finishes (its SessionsStorage has no TTL, so nobody would ever clean it
+    # up). Since we chose the session id, we can destroy the potential orphan;
+    # destroy is a no-op on the server if the session never materialized.
+    if session_id:
+        _schedule_orphan_session_cleanup(shared_state, session_id)
     return None
 
 
-def flaresolverr_destroy_session(shared_state, session_id):
+def _schedule_orphan_session_cleanup(shared_state, session_id, delays=(0, 60, 240)):
+    """Fire-and-forget destroys for a session whose create call failed client-side.
+
+    The server-side browser start can outlive our request timeout by minutes, so a
+    single immediate destroy would race the late registration — retry on a schedule
+    that covers slow starts.
+    """
+
+    def _run():
+        for delay in delays:
+            if delay:
+                time.sleep(delay)
+            flaresolverr_destroy_session(shared_state, session_id, attempts=1)
+
+    threading.Thread(
+        target=_run,
+        daemon=True,
+        name=f"fs-orphan-cleanup-{session_id[:8]}",
+    ).start()
+
+
+def flaresolverr_destroy_session(shared_state, session_id, attempts=2):
     if not is_flaresolverr_available(shared_state):
-        return
+        return False
 
     flaresolverr_url = shared_state.values["config"]("FlareSolverr").get("url")
     payload = {"cmd": "sessions.destroy", "session": session_id}
 
-    try:
-        requests.post(
-            flaresolverr_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=SESSION_REQUEST_TIMEOUT_SECONDS,
-        )
-    except Exception:
-        pass
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            requests.post(
+                flaresolverr_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                # A busy FlareSolverr needs longer to answer the destroy than the
+                # create default — give retries more headroom instead of leaking.
+                timeout=SESSION_REQUEST_TIMEOUT_SECONDS * (attempt + 1),
+            )
+            return True
+        except Exception as e:
+            last_error = e
+    info(
+        f"Could not destroy FlareSolverr session {session_id} "
+        f"after {attempts} attempt(s): {last_error}"
+    )
+    return False
