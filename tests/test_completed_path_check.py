@@ -16,6 +16,7 @@ import unittest
 from quasarr.downloads.packages import (
     completed_destination,
     package_at_destination,
+    package_source_gone,
 )
 
 
@@ -83,6 +84,8 @@ class LocationDecisionTests(unittest.TestCase):
             present, final_path = package_at_destination(save_to, completed_dir)
             if present:
                 final_storage = final_path
+            elif package_source_gone(save_to):
+                pass  # F5b: gone from working dir AND destination -> Completed
             else:
                 moving = True
         location = "queue" if moving else ("history" if error or finished else "queue")
@@ -116,6 +119,79 @@ class LocationDecisionTests(unittest.TestCase):
         loc, moving, _ = self._decide(False, None, "/staging/PkgX", self.dest)
         self.assertEqual("queue", loc)
         self.assertFalse(moving)
+
+
+class PackageSourceGoneTests(unittest.TestCase):
+    """F5b: prove-the-source-is-gone check (terminal state for 'Moving' zombies)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.work = self.tmp.name
+        os.environ["DOWNLOADER_WORKING_DIR"] = self.work
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("DOWNLOADER_WORKING_DIR", None)
+
+    def test_env_unset_never_claims_gone(self):
+        os.environ.pop("DOWNLOADER_WORKING_DIR", None)
+        self.assertFalse(package_source_gone(f"{self.work}/PkgX"))
+
+    def test_working_dir_not_visible_never_claims_gone(self):
+        os.environ["DOWNLOADER_WORKING_DIR"] = "/nonexistent-mount"
+        self.assertFalse(package_source_gone("/nonexistent-mount/PkgX"))
+
+    def test_save_to_outside_working_dir_never_claims_gone(self):
+        self.assertFalse(package_source_gone("/somewhere/else/PkgX"))
+        self.assertFalse(package_source_gone(self.work))  # root itself
+        # prefix trap: /stagingX must not match root /staging
+        self.assertFalse(package_source_gone(self.work + "X/PkgX"))
+
+    def test_missing_package_folder_is_gone(self):
+        self.assertTrue(package_source_gone(f"{self.work}/PkgX"))
+
+    def test_folder_with_files_is_not_gone(self):
+        pkg = os.path.join(self.work, "PkgX")
+        os.makedirs(os.path.join(pkg, "sub"))
+        with open(os.path.join(pkg, "sub", "episode.mkv"), "w") as f:
+            f.write("x")
+        self.assertFalse(package_source_gone(pkg))
+
+    def test_empty_folder_tree_counts_as_gone(self):
+        pkg = os.path.join(self.work, "PkgX")
+        os.makedirs(os.path.join(pkg, "leftover-empty-subdir"))
+        self.assertTrue(package_source_gone(pkg))
+
+
+class LocationDecisionF5bTests(LocationDecisionTests):
+    """Decision tests with DOWNLOADER_WORKING_DIR configured (F5b active)."""
+
+    def setUp(self):
+        super().setUp()
+        self.worktmp = tempfile.TemporaryDirectory()
+        self.work = self.worktmp.name
+        os.environ["DOWNLOADER_WORKING_DIR"] = self.work
+
+    def tearDown(self):
+        super().tearDown()
+        self.worktmp.cleanup()
+        os.environ.pop("DOWNLOADER_WORKING_DIR", None)
+
+    def test_finished_source_still_present_stays_moving(self):
+        pkg = os.path.join(self.work, "PkgX")
+        os.makedirs(pkg)
+        with open(os.path.join(pkg, "episode.mkv"), "w") as f:
+            f.write("x")
+        loc, moving, _ = self._decide(True, None, pkg, self.dest)
+        self.assertEqual("queue", loc)
+        self.assertTrue(moving)
+
+    def test_finished_source_and_destination_gone_goes_history(self):
+        # the exact zombie scenario: mover moved, *arr imported, cleanup removed
+        loc, moving, final = self._decide(True, None, f"{self.work}/PkgX", self.dest)
+        self.assertEqual("history", loc)
+        self.assertFalse(moving)
+        self.assertIsNone(final)
 
 
 if __name__ == "__main__":
