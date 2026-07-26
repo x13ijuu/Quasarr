@@ -41,6 +41,7 @@ from quasarr.search.sources.helpers import (
     get_source_metadata,
 )
 from quasarr.storage.config import Config
+from quasarr.storage.setup.arr import missing_arr_client_requirement
 from quasarr.storage.setup.common import (
     add_no_cache_headers,
     render_reconnect_success,
@@ -97,11 +98,6 @@ def _capabilities_html(meta):
                 f'<span class="cap-chip cap-cat" title="{label}">{emoji} {label}</span>'
             )
 
-    if meta.get("requires_radarr"):
-        chips.append('<span class="cap-chip">📡 Radarr Required</span>')
-    if meta.get("requires_sonarr"):
-        chips.append('<span class="cap-chip">📡 Sonarr Required</span>')
-
     if not chips:
         return ""
     return f'<div class="hostname-caps">{"".join(chips)}</div>'
@@ -155,21 +151,13 @@ def hostname_form_html(shared_state, message, show_skip_management=False):
     hostname_issues = get_all_hostname_issues()
     source_metadata = get_source_metadata()
 
-    from quasarr.storage.setup.radarr import (
-        is_radarr_configured,
-        is_radarr_skipped,
-    )
-    from quasarr.storage.setup.sonarr import (
-        is_sonarr_configured,
-        is_sonarr_skipped,
-    )
+    from quasarr.storage.setup.radarr import is_radarr_configured
+    from quasarr.storage.setup.sonarr import is_sonarr_configured
 
     radarr_required = set(get_radarr_required_hostnames())
     radarr_ok = is_radarr_configured(shared_state)
-    radarr_skipped = is_radarr_skipped()
     sonarr_required = set(get_sonarr_required_hostnames())
     sonarr_ok = is_sonarr_configured(shared_state)
-    sonarr_skipped = is_sonarr_skipped()
 
     for label in shared_state.values["sites"]:
         field_id = label.lower()
@@ -179,8 +167,9 @@ def hostname_form_html(shared_state, message, show_skip_management=False):
             field_id in get_login_required_hostnames()
             and skip_login_db.retrieve(field_id)
         )
-        needs_radarr = field_id in radarr_required and not radarr_ok
-        needs_sonarr = field_id in sonarr_required and not sonarr_ok
+        missing_arr_client = missing_arr_client_requirement(
+            field_id, radarr_required, sonarr_required, radarr_ok, sonarr_ok
+        )
         issue = hostname_issues.get(field_id)
         timestamp = ""
         operation = ""
@@ -195,29 +184,13 @@ def hostname_form_html(shared_state, message, show_skip_management=False):
             status_emoji = "🟡"
             status_title = "Login was skipped"
             error_details_for_modal = "Login was skipped for this site."
-        elif needs_radarr:
-            status = "skipped" if radarr_skipped else "error"
-            status_emoji = "🟡" if radarr_skipped else "🔴"
-            status_title = (
-                "Radarr setup was skipped"
-                if radarr_skipped
-                else "Radarr not configured"
-            )
+        elif missing_arr_client:
+            status = "error"
+            status_emoji = "🔴"
+            status_title = f"{missing_arr_client} not configured"
             error_details_for_modal = (
-                "This site requires Radarr. Configure the Radarr URL and API key "
-                "in the Radarr Configuration section on the home page."
-            )
-        elif needs_sonarr:
-            status = "skipped" if sonarr_skipped else "error"
-            status_emoji = "🟡" if sonarr_skipped else "🔴"
-            status_title = (
-                "Sonarr setup was skipped"
-                if sonarr_skipped
-                else "Sonarr not configured"
-            )
-            error_details_for_modal = (
-                "This site requires Sonarr. Configure the Sonarr URL and API key "
-                "in the Sonarr Configuration section on the home page."
+                f"This site requires {missing_arr_client}. Configure its URL and API "
+                "key in the *arr Configuration section on the home page."
             )
         elif issue:
             status = "error"

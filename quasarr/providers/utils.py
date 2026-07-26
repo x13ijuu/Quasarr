@@ -220,15 +220,18 @@ def is_site_usable(shared_state, shorthand):
     if not hostname:
         return False
 
-    # Check Radarr requirement (independent of login requirement)
-    if shorthand in get_radarr_required_hostnames():
-        if not radarr_api.get_client(shared_state):
-            return False
+    # Keep dual-category sources usable with either configured Arr client.
+    # Import lazily because setup modules also consume provider services.
+    from quasarr.storage.setup.arr import missing_arr_client_requirement
 
-    # Check Sonarr requirement (independent of login requirement)
-    if shorthand in get_sonarr_required_hostnames():
-        if not sonarr_api.get_client(shared_state):
-            return False
+    if missing_arr_client_requirement(
+        shorthand,
+        set(get_radarr_required_hostnames()),
+        set(get_sonarr_required_hostnames()),
+        bool(radarr_api.get_client(shared_state)),
+        bool(sonarr_api.get_client(shared_state)),
+    ):
+        return False
 
     if shorthand not in get_login_required_hostnames():
         return True  # No login needed, hostname is enough
@@ -325,6 +328,44 @@ def detect_crypter_type(url):
         return "filecrypt"
     elif "keeplinks." in url_lower:
         return "keeplinks"
+    return None
+
+
+# flaresolverr-next: recorded at document start on every (redirect) document the
+# solver browser renders, appending each URL to window.name (which survives
+# cross-origin navigation). This lets a caller read the full chain the browser
+# walked instead of only its final URL - so when a source's link-protection
+# redirect passes through a crypter container and a hostile ad then pushes the tab
+# onto an affiliate page (Quasarr#419: aliexpress), we can still recover the crypter
+# and ignore everything after it. Builds without documentStartJs support ignore it
+# and the chain is simply unavailable (callers fall back to their header/URL logic).
+NAVIGATION_CHAIN_RECORDER_JS = (
+    "try{var c=[];try{c=JSON.parse(window.name||'[]');}catch(e){c=[];}"
+    "if(!Array.isArray(c))c=[];c.push(location.href);"
+    "window.name=JSON.stringify(c);}catch(e){}"
+)
+NAVIGATION_CHAIN_READ_JS = "return window.name;"
+
+
+def first_crypter_in_chain(execute_js_result):
+    """Return the first crypter URL in a recorded navigation chain, or None.
+
+    ``execute_js_result`` is the JSON string produced by
+    ``NAVIGATION_CHAIN_READ_JS`` (the browser's ordered list of visited URLs). The
+    first entry whose ``detect_crypter_type`` is not None is the real container link;
+    anything after it (e.g. a hostile ad redirect) is ignored. Returns None when no
+    chain is available (non-browser resolution / FlareSolverr build without support)
+    or no crypter was walked, so callers keep their existing behavior.
+    """
+    try:
+        chain = json.loads(execute_js_result) if execute_js_result else []
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(chain, list):
+        return None
+    for hop_url in chain:
+        if isinstance(hop_url, str) and detect_crypter_type(hop_url) is not None:
+            return hop_url
     return None
 
 
@@ -1033,7 +1074,7 @@ def match_in_title(title: str, season: int = None, episode: int = None) -> bool:
             if not e_start:
                 return True
             else:
-                # title did specify an episode — skip this match
+                # title did specify an episode, so skip this match
                 continue
 
         # episode was requested, so title must supply one
@@ -1345,7 +1386,7 @@ def is_valid_release(
         if is_xxx_search:
             return True
 
-        # unknown search source — reject by default
+        # unknown search source, so reject by default
         debug(f"Skipping {title!r} as search category is unknown: {search_category!r}")
         return False
 

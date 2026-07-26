@@ -203,7 +203,10 @@ class Source(AbstractSearchSource):
         try:
             imdb_id = is_imdb_id(search_string)
             if imdb_id:
-                search_string = get_localized_title(shared_state, imdb_id, "en") or ""
+                search_string = (
+                    get_localized_title(shared_state, imdb_id, "en", search_category)
+                    or ""
+                )
                 search_string = html.unescape(search_string)
                 if not search_string:
                     info(f"Could not extract title from IMDb-ID {imdb_id}")

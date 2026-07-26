@@ -18,6 +18,51 @@ from quasarr.constants import (
 from quasarr.providers.log import debug, info
 from quasarr.providers.utils import is_flaresolverr_available
 
+_CLOUDFLARE_GATE_TTL_SECONDS = 24 * 60 * 60
+_cloudflare_gate_expires_at = {}
+_cloudflare_gate_lock = threading.Lock()
+
+
+def _cloudflare_gate_key(url):
+    return urllib.parse.urlparse(url).netloc.casefold()
+
+
+def _is_cloudflare_gated(url):
+    key = _cloudflare_gate_key(url)
+    if not key:
+        return False
+
+    now = time.monotonic()
+    with _cloudflare_gate_lock:
+        expires_at = _cloudflare_gate_expires_at.get(key)
+        if expires_at is None:
+            return False
+        if expires_at <= now:
+            _cloudflare_gate_expires_at.pop(key, None)
+            return False
+        return True
+
+
+def _mark_cloudflare_gated(url):
+    """Remember a challenged netloc and return True only for first detection."""
+    key = _cloudflare_gate_key(url)
+    if not key:
+        return True
+
+    now = time.monotonic()
+    with _cloudflare_gate_lock:
+        expires_at = _cloudflare_gate_expires_at.get(key)
+        if expires_at is not None and expires_at > now:
+            return False
+        _cloudflare_gate_expires_at[key] = now + _CLOUDFLARE_GATE_TTL_SECONDS
+        return True
+
+
+def _clear_cloudflare_gate_cache():
+    """Clear process-local gate state for hermetic tests."""
+    with _cloudflare_gate_lock:
+        _cloudflare_gate_expires_at.clear()
+
 
 def is_cloudflare_challenge(html: str) -> bool:
     soup = BeautifulSoup(html, "html.parser")
@@ -54,10 +99,27 @@ class LazyFlareSolverrSession:
         self.shared_state = shared_state
         self.session_id = None
 
-    def get(self, url, headers, timeout, request_get=requests.get):
-        response = request_get(url, headers=headers, timeout=timeout)
-        if response.status_code != 403 and not is_cloudflare_challenge(response.text):
-            return response
+    def get(
+        self,
+        url,
+        headers,
+        timeout,
+        request_get=requests.get,
+        document_start_js=None,
+        execute_js=None,
+    ):
+        if not _is_cloudflare_gated(url):
+            response = request_get(url, headers=headers, timeout=timeout)
+            if response.status_code != 403 and not is_cloudflare_challenge(
+                response.text
+            ):
+                return response
+
+            if _mark_cloudflare_gated(url):
+                debug(
+                    "Detected Cloudflare protection. Routing this host through "
+                    "FlareSolverr for 24 hours."
+                )
 
         if not is_flaresolverr_available(self.shared_state):
             raise requests.RequestException(
@@ -74,12 +136,23 @@ class LazyFlareSolverrSession:
                     "Could not create FlareSolverr session for Cloudflare bypass"
                 )
 
-        debug("Encountered Cloudflare protection. Retrying with FlareSolverr...")
+        # Browser solves can take longer than a plain search request. Keep the
+        # caller's HTTP budget for the initial request, but never give an
+        # actual FlareSolverr solve less than the existing session budget.
+        solver_timeout = max(timeout, SESSION_REQUEST_TIMEOUT_SECONDS)
+        # Only forward the flaresolverr-next JS extras when a caller asked for them,
+        # so existing call sites (and their test doubles) keep the original signature.
+        extra_js = {}
+        if document_start_js:
+            extra_js["document_start_js"] = document_start_js
+        if execute_js:
+            extra_js["execute_js"] = execute_js
         response = flaresolverr_get(
             self.shared_state,
             url,
-            timeout=timeout,
+            timeout=solver_timeout,
             session_id=self.session_id,
+            **extra_js,
         )
         if (
             response is None
@@ -236,12 +309,15 @@ class FlareSolverrResponse:
     Minimal Response-like object so it behaves like requests.Response.
     """
 
-    def __init__(self, url, status_code, headers, text):
+    def __init__(self, url, status_code, headers, text, execute_js_result=None):
         self.url = url
         self.status_code = status_code
         self.headers = headers or {}
         self.text = text or ""
         self.content = self.text.encode("utf-8")
+        # flaresolverr-next: result string of an optional executeJs snippet, or None
+        # when none was requested / the FlareSolverr build does not support it.
+        self.execute_js_result = execute_js_result
 
         # Cloudflare cookies are irrelevant here, but keep attribute for compatibility
         self.cookies = requests.cookies.RequestsCookieJar()
@@ -265,10 +341,17 @@ def flaresolverr_get(
     url,
     timeout=None,
     session_id=None,
+    document_start_js=None,
+    execute_js=None,
 ):
     """
     Core function for performing a GET request via FlareSolverr only.
     Used internally by FlareSolverrSession.get()
+
+    ``document_start_js`` / ``execute_js`` are flaresolverr-next extras: JS run at
+    document start on every (redirect) document, and JS run once on the solved page
+    whose string result is returned as ``FlareSolverrResponse.execute_js_result``.
+    FlareSolverr builds without support simply ignore them.
 
     Returns None if FlareSolverr is not available.
     """
@@ -288,6 +371,10 @@ def flaresolverr_get(
     payload = {"cmd": "request.get", "url": url, "maxTimeout": timeout * 1000}
     if session_id:
         payload["session"] = session_id
+    if document_start_js:
+        payload["documentStartJs"] = document_start_js
+    if execute_js:
+        payload["executeJs"] = execute_js
 
     try:
         resp = requests.post(
@@ -319,7 +406,11 @@ def flaresolverr_get(
         shared_state.update("user_agent", user_agent)
 
     return FlareSolverrResponse(
-        url=url, status_code=status_code, headers=fs_headers, text=html
+        url=url,
+        status_code=status_code,
+        headers=fs_headers,
+        text=html,
+        execute_js_result=solution.get("executeJsResult"),
     )
 
 

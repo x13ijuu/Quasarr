@@ -182,7 +182,7 @@ class Source(AbstractSearchSource):
         imdb_id = is_imdb_id(search_string)
         if imdb_id:
             debug(f"Received IMDb ID: <y>{imdb_id}</y>")
-            title = get_localized_title(shared_state, imdb_id, "de")
+            title = get_localized_title(shared_state, imdb_id, "de", search_category)
             if not title:
                 error(f"No title found for IMDb '{imdb_id}'")
                 return releases

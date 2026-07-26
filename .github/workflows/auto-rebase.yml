@@ -1,5 +1,8 @@
 # auto-rebase.yml — hält die maja-Linie automatisch auf dem neuesten Upstream-Release.
 #
+# ACHTUNG: Scheduled-Workflows laufen NUR vom Default-Branch. Default-Branch des
+# Forks ist deshalb maja/main (seit 2026-07-26); `main` bleibt reiner Upstream-Mirror.
+#
 # Täglich (06:00 UTC): neuestes rix1337/Quasarr-Release-Tag vs. __version__ auf
 # maja/main. Ist Upstream neuer: Merge + MAJA_PATCH_LEVEL-Bump + volle Testsuite.
 #   * Merge sauber + Tests grün  -> direkter Push auf maja/main (Release-Fork-CI
@@ -72,7 +75,14 @@ jobs:
 
       - name: Push to maja/main (clean merge + green tests)
         if: steps.merge.outputs.state == 'merged' && steps.tests.outcome == 'success'
-        run: git push origin maja/main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git push origin maja/main
+          # Pushes mit GITHUB_TOKEN triggern keine on:push-Workflows — den
+          # Image-Build daher explizit dispatchen (release-fork.yml hat workflow_dispatch).
+          gh workflow run release-fork.yml --ref maja/main
 
       - name: Open PR instead (conflict or red tests)
         if: steps.up.outputs.action == 'rebase' && (steps.merge.outputs.state == 'conflict' || steps.tests.outcome == 'failure')

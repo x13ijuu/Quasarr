@@ -320,7 +320,14 @@ class ProtectedRedirectSourceTests(unittest.TestCase):
                 return_value=FakeSession(),
             ),
             patch(
-                "quasarr.downloads.sources.sf.detect_crypter_type",
+                "quasarr.providers.cloudflare.is_flaresolverr_available"
+            ) as is_available,
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_create_session"
+            ) as create_session,
+            patch("quasarr.providers.cloudflare.flaresolverr_get") as flaresolverr_get,
+            patch(
+                "quasarr.downloads.sources.helpers.redirect.detect_crypter_type",
                 side_effect=lambda url: "filecrypt" if url == protected_url else None,
             ),
         ):
@@ -343,6 +350,9 @@ class ProtectedRedirectSourceTests(unittest.TestCase):
             ],
             requested_urls,
         )
+        is_available.assert_not_called()
+        create_session.assert_not_called()
+        flaresolverr_get.assert_not_called()
 
     def test_sf_rejects_non_redirect_success_page(self):
         external_url = "https://host-sf.invalid/external/2/blocked"
@@ -363,7 +373,7 @@ class ProtectedRedirectSourceTests(unittest.TestCase):
                 return_value=FakeSession(),
             ),
             patch(
-                "quasarr.downloads.sources.sf.detect_crypter_type",
+                "quasarr.downloads.sources.helpers.redirect.detect_crypter_type",
                 return_value=None,
             ),
         ):
@@ -763,7 +773,7 @@ class ProtectedRedirectDownloadTests(unittest.TestCase):
                     return_value=FakeSession(),
                 ),
                 patch(
-                    "quasarr.downloads.sources.sf.detect_crypter_type",
+                    "quasarr.downloads.sources.helpers.redirect.detect_crypter_type",
                     side_effect=lambda url: (
                         "filecrypt" if url == protected_url else None
                     ),

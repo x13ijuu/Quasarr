@@ -10,10 +10,10 @@ from bs4 import BeautifulSoup
 
 from quasarr.constants import DOWNLOAD_REQUEST_TIMEOUT_SECONDS
 from quasarr.downloads.sources.helpers.abstract_source import AbstractDownloadSource
+from quasarr.downloads.sources.helpers.redirect import resolve_crypter_redirect
 from quasarr.providers.cloudflare import LazyFlareSolverrSession
 from quasarr.providers.hostname_issues import mark_hostname_issue
-from quasarr.providers.log import debug, info
-from quasarr.providers.utils import detect_crypter_type
+from quasarr.providers.log import info
 
 
 class Source(AbstractDownloadSource):
@@ -35,7 +35,7 @@ class Source(AbstractDownloadSource):
         user_agent = shared_state.values["user_agent"]
 
         if url.startswith(f"https://{host}/external"):
-            resolved_url = _resolve_ff_redirect(url, user_agent, host)
+            resolved_url = _resolve_ff_redirect(url, user_agent, host, cf_session)
             if not resolved_url:
                 return {"links": [], "imdb_id": None}
             return {
@@ -90,7 +90,9 @@ class Source(AbstractDownloadSource):
                 if not release_url:
                     return {"links": [], "imdb_id": imdb_id}
 
-                resolved_url = _resolve_ff_redirect(release_url, user_agent, host)
+                resolved_url = _resolve_ff_redirect(
+                    release_url, user_agent, host, cf_session
+                )
                 if not resolved_url:
                     return {"links": [], "imdb_id": imdb_id}
 
@@ -141,72 +143,16 @@ def _select_release_link(base_url, entry, mirrors):
     return links[0]
 
 
-def _resolve_ff_redirect(url, user_agent, host):
-    current_url = url
-    visited = set()
-    session = requests.Session()
-    source_netloc = urlparse(f"https://{host}").netloc
-
-    for _hop in range(8):
-        if current_url in visited:
-            debug(f"FF redirect loop detected for {current_url}")
-            return None
-        visited.add(current_url)
-
-        if detect_crypter_type(current_url) is not None:
-            return current_url
-
-        try:
-            r = session.get(
-                current_url,
-                allow_redirects=False,
-                timeout=DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
-                headers={"User-Agent": user_agent},
-            )
-        except Exception as e:
-            info(f"Error fetching redirected URL for {url}: {e}")
-            mark_hostname_issue(
-                Source.initials,
-                "download",
-                str(e) if "e" in dir() else "Download error",
-            )
-            return None
-
-        location = (r.headers.get("Location") or "").strip()
-        if location:
-            next_url = urljoin(current_url, location)
-            debug(f"Redirected from <d>{current_url}</d> to <d>{next_url}</d>")
-            if "/404.html" in next_url:
-                info(f"Link redirected to 404 page: <d>{next_url}</d>")
-                return None
-            if detect_crypter_type(next_url) is not None:
-                return next_url
-            if urlparse(next_url).netloc != source_netloc:
-                return next_url
-            current_url = next_url
-            continue
-
-        final_url = (r.url or current_url).strip()
-        if "/404.html" in final_url:
-            info(f"Link redirected to 404 page: <d>{final_url}</d>")
-            return None
-        if r.status_code >= 400:
-            info(
-                f"Error fetching redirected URL for {url}: HTTP {r.status_code} at {final_url}"
-            )
-            mark_hostname_issue(
-                Source.initials,
-                "download",
-                f"HTTP {r.status_code} while resolving redirect",
-            )
-            return None
-        info(
-            f"Blocked attempt to resolve {url}. Your IP may be banned. Try again later."
-        )
-        return None
-
-    debug(f"FF redirect hop limit exceeded for {url}")
-    return None
+def _resolve_ff_redirect(url, user_agent, host, cf_session):
+    # FF publishes direct hoster links too, so accept an off-site final URL.
+    return resolve_crypter_redirect(
+        url,
+        user_agent,
+        cf_session,
+        Source.initials,
+        host=host,
+        accept_offsite=True,
+    )
 
 
 def _mirror_from_url(url):

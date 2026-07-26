@@ -164,7 +164,7 @@ class Source(AbstractSearchSource):
                             }
                         )
                 except Exception as e:
-                    info(f"Error parsing feed: {e}")
+                    warn(f"Error parsing feed: {e}")
                     mark_hostname_issue(
                         self.initials,
                         "feed",
@@ -225,7 +225,9 @@ class Source(AbstractSearchSource):
 
         imdb_id_in_search = is_imdb_id(search_string)
         if imdb_id_in_search:
-            search_string = get_localized_title(shared_state, imdb_id_in_search, "de")
+            search_string = get_localized_title(
+                shared_state, imdb_id_in_search, "de", search_category
+            )
             if not search_string:
                 info(f"Could not extract title from IMDb-ID {imdb_id_in_search}")
                 return releases
@@ -246,7 +248,9 @@ class Source(AbstractSearchSource):
         except Exception as e:
             warn(f"Error loading search: {e}")
             mark_hostname_issue(
-                self.initials, "search", str(e) if "e" in dir() else "Error occurred"
+                self.initials,
+                "search",
+                str(e) if "e" in dir() else "Error occurred",
             )
             return releases
 

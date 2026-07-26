@@ -42,10 +42,11 @@ class DateNumberingDispatchTests(unittest.TestCase):
         )
         shared_state = SimpleNamespace(
             values={
+                "sonarr_client": object(),
                 "config": lambda _section: {
                     "aa": "aa.invalid",
                     "bb": "bb.invalid",
-                }
+                },
             }
         )
         return enabled, disabled, shared_state

@@ -60,11 +60,15 @@ class AbstractSearchSource(ABC):
 
     @property
     def requires_radarr(self) -> bool:
-        return False
+        from quasarr.constants import SEARCH_CAT_MOVIES
+
+        return SEARCH_CAT_MOVIES in self.supported_categories
 
     @property
     def requires_sonarr(self) -> bool:
-        return False
+        from quasarr.constants import SEARCH_CAT_SHOWS
+
+        return SEARCH_CAT_SHOWS in self.supported_categories
 
     @abstractmethod
     def search(

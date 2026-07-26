@@ -6,12 +6,11 @@ import html
 import re
 from datetime import datetime, timedelta
 from json import dumps, loads
-from urllib.parse import quote
 
 import requests
 from bs4 import BeautifulSoup
 
-from quasarr.providers.log import debug, info
+from quasarr.providers.log import debug, error
 
 
 def _get_db(table_name):
@@ -81,144 +80,44 @@ class TitleCleaner:
             return title
 
 
-class IMDbAPI:
-    """Tier 1: api.imdbapi.dev - Primary, fast, comprehensive."""
-
-    _BASE_URL = "https://api.imdbapi.dev"
-
-    @staticmethod
-    def get_title(imdb_id):
-        try:
-            response = requests.get(f"{IMDbAPI._BASE_URL}/titles/{imdb_id}", timeout=30)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            info(f"IMDbAPI get_title failed for {imdb_id}: {e}")
-            return None
-
-    @staticmethod
-    def get_akas(imdb_id):
-        try:
-            response = requests.get(
-                f"{IMDbAPI._BASE_URL}/titles/{imdb_id}/akas", timeout=30
-            )
-            response.raise_for_status()
-            return response.json().get("akas", [])
-        except Exception as e:
-            info(f"IMDbAPI get_akas failed for {imdb_id}: {e}")
-            return []
-
-    @staticmethod
-    def search_titles(query):
-        try:
-            response = requests.get(
-                f"{IMDbAPI._BASE_URL}/search/titles?query={quote(query)}&limit=5",
-                timeout=30,
-            )
-            response.raise_for_status()
-            return response.json().get("titles", [])
-        except Exception as e:
-            debug(f"IMDbAPI search_titles failed: {e}")
-            return []
-
-
-class IMDbCDN:
-    """Tier 2: v2.sg.media-imdb.com - Fast fallback for English data."""
-
-    _CDN_URL = "https://v2.sg.media-imdb.com/suggestion"
-
-    @staticmethod
-    def _get_cdn_data(imdb_id, language, user_agent):
-        try:
-            if not imdb_id or len(imdb_id) < 2:
-                return None
-
-            headers = {
-                "Accept-Language": f"{language},en;q=0.9",
-                "User-Agent": user_agent,
-                "Accept": "application/json",
-            }
-
-            first_char = imdb_id[0].lower()
-            url = f"{IMDbCDN._CDN_URL}/{first_char}/{imdb_id}.json"
-
-            response = requests.get(url, headers=headers, timeout=5)
-            response.raise_for_status()
-
-            data = response.json()
-
-            if "d" in data and len(data["d"]) > 0:
-                for entry in data["d"]:
-                    if entry.get("id") == imdb_id:
-                        return entry
-                return data["d"][0]
-
-        except Exception as e:
-            debug(f"IMDbCDN request failed for {imdb_id}: {e}")
-
-        return None
-
-    @staticmethod
-    def get_poster(imdb_id, user_agent):
-        data = IMDbCDN._get_cdn_data(imdb_id, "en", user_agent)
-        if data:
-            image_node = data.get("i")
-            if image_node and "imageUrl" in image_node:
-                return image_node["imageUrl"]
-        return None
-
-    @staticmethod
-    def get_title(imdb_id, user_agent):
-        """Returns the English title from CDN."""
-        data = IMDbCDN._get_cdn_data(imdb_id, "en", user_agent)
-        if data and "l" in data:
-            return data["l"]
-        return None
-
-    @staticmethod
-    def search_titles(query, ttype, language, user_agent):
-        try:
-            clean_query = quote(query.lower().replace(" ", "_"))
-            if not clean_query:
-                return []
-
-            headers = {
-                "Accept-Language": f"{language},en;q=0.9",
-                "User-Agent": user_agent,
-            }
-
-            first_char = clean_query[0]
-            url = f"{IMDbCDN._CDN_URL}/{first_char}/{clean_query}.json"
-
-            response = requests.get(url, headers=headers, timeout=5)
-
-            if response.status_code == 200:
-                data = response.json()
-                results = []
-                if "d" in data:
-                    for item in data["d"]:
-                        results.append(
-                            {
-                                "id": item.get("id"),
-                                "titleNameText": item.get("l"),
-                                "titleReleaseText": item.get("y"),
-                            }
-                        )
-                return results
-
-        except Exception as e:
-            debug(f"IMDb CDN search failed: {e}")
-
-        return []
-
-
-class IMDbFlareSolverr:
-    """Tier 3: FlareSolverr - Robust fallback using browser automation."""
+class IMDbHTML:
+    """IMDb release-info HTML scraper used only for localized titles."""
 
     _WEB_URL = "https://www.imdb.com"
+    _HTML_USER_AGENT = (
+        "Mozilla/5.0 (compatible; Applebot/0.1; +http://www.apple.com/go/applebot)"
+    )
+    _LANGUAGE_HEADERS = {
+        "de": "de-DE,de;q=0.9,en;q=0.8",
+        "en": "en-US,en;q=0.9",
+        "fr": "fr-FR,fr;q=0.9,en;q=0.8",
+        "es": "es-ES,es;q=0.9,en;q=0.8",
+        "it": "it-IT,it;q=0.9,en;q=0.8",
+        "pt": "pt-PT,pt;q=0.9,en;q=0.8",
+        "ru": "ru-RU,ru;q=0.9,en;q=0.8",
+        "ja": "ja-JP,ja;q=0.9,en;q=0.8",
+        "hi": "hi-IN,hi;q=0.9,en;q=0.8",
+    }
 
     @staticmethod
-    def _request(url):
+    def _request(url, language):
+        headers = {
+            "Accept-Language": IMDbHTML._LANGUAGE_HEADERS.get(
+                language, f"{language},en;q=0.8"
+            ),
+            "User-Agent": IMDbHTML._HTML_USER_AGENT,
+        }
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code == 200 and response.text:
+                if IMDbHTML._parse_localized_title(response.text, language):
+                    return response.text
+                debug("IMDb direct HTML had no proven localized title")
+        except Exception as e:
+            debug(f"IMDb HTML request failed for {url}: {e}")
+
+        # Browser fallback preserves the old AKA parsing path when direct HTML
+        # is unavailable. FlareSolverr cannot reliably set localization headers.
         flaresolverr_url = _get_config("FlareSolverr").get("url")
         flaresolverr_skipped = _get_db("skip_flaresolverr").retrieve("skipped")
 
@@ -236,150 +135,402 @@ class IMDbFlareSolverr:
                 flaresolverr_url,
                 json=post_data,
                 headers={"Content-Type": "application/json"},
-                timeout=30,
+                timeout=70,
             )
             if response.status_code == 200:
                 json_response = response.json()
                 if json_response.get("status") == "ok":
-                    return json_response.get("solution", {}).get("response", "")
+                    solution_html = json_response.get("solution", {}).get(
+                        "response", ""
+                    )
+                    if IMDbHTML._parse_localized_title(solution_html, language):
+                        return solution_html
+                    debug("IMDb FlareSolverr HTML had no proven localized title")
         except Exception as e:
             debug(f"FlareSolverr request failed for {url}: {e}")
 
         return None
 
+    _COUNTRIES_BY_LANGUAGE = {
+        "en": ("United States", "United Kingdom", "Canada", "Australia"),
+        "de": ("Germany", "Austria", "Switzerland", "West Germany"),
+        "fr": ("France", "Canada", "Belgium"),
+        "es": ("Spain", "Mexico", "Argentina"),
+        "it": ("Italy",),
+        "pt": ("Portugal", "Brazil"),
+        "ru": ("Russia", "Soviet Union"),
+        "ja": ("Japan",),
+        "hi": ("India",),
+    }
+    _COUNTRY_CODES_BY_LANGUAGE = {
+        "en": ("US", "GB", "CA", "AU"),
+        "de": ("DE", "AT", "CH", "XWG"),
+        "fr": ("FR", "CA", "BE"),
+        "es": ("ES", "MX", "AR"),
+        "it": ("IT",),
+        "pt": ("PT", "BR"),
+        "ru": ("RU", "SUHH"),
+        "ja": ("JP",),
+        "hi": ("IN",),
+    }
+    _LANGUAGE_CODES_BY_NAME = {
+        "english": "en",
+        "german": "de",
+        "french": "fr",
+        "spanish": "es",
+        "italian": "it",
+        "portuguese": "pt",
+        "russian": "ru",
+        "japanese": "ja",
+        "hindi": "hi",
+    }
+
     @staticmethod
-    def get_poster(imdb_id):
-        html_content = IMDbFlareSolverr._request(
-            f"{IMDbFlareSolverr._WEB_URL}/title/{imdb_id}/"
+    def _next_data(soup):
+        node = soup.find("script", id="__NEXT_DATA__")
+        if node is None or not node.string:
+            return None
+        try:
+            return loads(node.string)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _localized_titles_from_next_data(next_data, language):
+        if not isinstance(next_data, dict):
+            return None, None
+
+        props = next_data.get("props")
+        page_props = props.get("pageProps") if isinstance(props, dict) else None
+        if not isinstance(page_props, dict):
+            return None, None
+        content_data = page_props.get("contentData")
+        if not isinstance(content_data, dict):
+            return None, None
+        data = content_data.get("data")
+        title_data = data.get("title") if isinstance(data, dict) else {}
+        if not isinstance(title_data, dict):
+            title_data = {}
+
+        country_codes = IMDbHTML._COUNTRY_CODES_BY_LANGUAGE.get(language, ())
+        country_matches = []
+        akas = title_data.get("akas")
+        edges = akas.get("edges", []) if isinstance(akas, dict) else []
+        for edge in edges or []:
+            node = edge.get("node", {}) if isinstance(edge, dict) else {}
+            if not isinstance(node, dict):
+                continue
+            country = node.get("country")
+            country_code = country.get("id") if isinstance(country, dict) else None
+            aka_language = node.get("language")
+            aka_language = (
+                aka_language.get("id", "").lower()
+                if isinstance(aka_language, dict)
+                else ""
+            )
+            displayable_property = node.get("displayableProperty")
+            value = (
+                displayable_property.get("value")
+                if isinstance(displayable_property, dict)
+                else None
+            )
+            title = value.get("plainText") if isinstance(value, dict) else None
+            if not title:
+                continue
+            if aka_language == language:
+                return title, None
+            if country_code in country_codes and not aka_language:
+                country_matches.append(title)
+
+        if country_matches:
+            return country_matches[0], None
+
+        request_context = page_props.get("requestContext")
+        sidecar = (
+            request_context.get("sidecar")
+            if isinstance(request_context, dict)
+            else None
         )
-        if html_content:
+        localization = (
+            sidecar.get("localizationResponse") if isinstance(sidecar, dict) else None
+        )
+        if not isinstance(localization, dict):
+            return None, None
+        user_language = localization.get("userLanguage", "").split("-", 1)[0].lower()
+        locale_is_proven = (
+            user_language == language
+            and localization.get("isFullLocalizationEnabled") is True
+            and localization.get("isOriginalTitlePreferenceSet") is False
+        )
+        if not locale_is_proven:
+            return None, None
+
+        entity_metadata = content_data.get("entityMetadata")
+        title_text = (
+            entity_metadata.get("titleText")
+            if isinstance(entity_metadata, dict)
+            else None
+        ) or title_data.get("titleText")
+        localized_title = (
+            title_text.get("text") if isinstance(title_text, dict) else None
+        )
+        return None, localized_title
+
+    @staticmethod
+    def _row_has_conflicting_language(values, language):
+        for value in values:
+            qualifier = value.strip().strip("()").lower()
+            for name, code in IMDbHTML._LANGUAGE_CODES_BY_NAME.items():
+                if qualifier == name or qualifier.startswith(f"{name} "):
+                    return code != language
+        return False
+
+    @staticmethod
+    def _parse_localized_title(html_content, language):
+        """Parse a localized title from IMDb's current AKA HTML section."""
+        if not html_content:
+            return None
+
+        language = language.lower()
+        soup = BeautifulSoup(html_content, "html.parser")
+        embedded_aka, localized_page_title = IMDbHTML._localized_titles_from_next_data(
+            IMDbHTML._next_data(soup), language
+        )
+        if embedded_aka:
+            return embedded_aka
+
+        target_countries = IMDbHTML._COUNTRIES_BY_LANGUAGE.get(language, ())
+        if not target_countries:
+            return localized_page_title
+
+        heading = soup.find(id="akas")
+        akas_section = soup.find(attrs={"data-testid": "sub-section-akas"})
+        if akas_section is None and heading is not None:
+            akas_section = heading.find_parent("section")
+        if akas_section is None:
+            return localized_page_title
+
+        # Current IMDb markup uses generic nested elements under the #akas
+        # section. Country and title are adjacent text values in each row.
+        for country_node in akas_section.find_all(string=True):
+            country = country_node.strip()
+            if not any(
+                country == target or country.startswith(f"{target} (")
+                for target in target_countries
+            ):
+                continue
+
+            element = country_node.parent
+            row = element.find_parent(["li", "tr"])
+            if row is None:
+                row = element.parent
+            values = [value.strip() for value in row.stripped_strings if value.strip()]
             try:
-                soup = BeautifulSoup(html_content, "html.parser")
-                poster_div = soup.find("div", class_="ipc-poster")
-                if poster_div and poster_div.div and poster_div.div.img:
-                    poster_set = poster_div.div.img.get("srcset")
-                    if poster_set:
-                        poster_links = [x for x in poster_set.split(" ") if len(x) > 10]
-                        return poster_links[-1]
-            except Exception as e:
-                debug(f"FlareSolverr poster parsing failed: {e}")
-        return None
+                country_index = values.index(country)
+            except ValueError:
+                continue
+            if country_index + 1 < len(
+                values
+            ) and not IMDbHTML._row_has_conflicting_language(
+                values[country_index + 2 :], language
+            ):
+                return values[country_index + 1]
+
+        # Preserve compatibility with the previous metadata-list markup, but
+        # keep lookup scoped to the AKA section so release-date countries do
+        # not get mistaken for localized titles.
+        for item in akas_section.select("li.ipc-metadata-list__item"):
+            label = item.select_one(
+                ".ipc-metadata-list-item__label, "
+                ".ipc-metadata-list-item__list-content-item"
+            )
+            if not label:
+                continue
+            country = label.get_text(" ", strip=True)
+            if not any(target in country for target in target_countries):
+                continue
+            values = [value.strip() for value in item.stripped_strings if value.strip()]
+            if len(values) > 1 and not IMDbHTML._row_has_conflicting_language(
+                values[2:], language
+            ):
+                return values[1]
+
+        return localized_page_title
 
     @staticmethod
     def get_localized_title(imdb_id, language):
-        # FlareSolverr doesn't reliably support headers for localization.
-        # Instead, we scrape the release info page which lists AKAs.
-        url = f"{IMDbFlareSolverr._WEB_URL}/title/{imdb_id}/releaseinfo"
-        html_content = IMDbFlareSolverr._request(url)
+        # The locale-specific HTML metadata is primary. The parser retains an
+        # AKA-section fallback for older or browser-rendered responses.
+        language = language.lower()
+        if language == "en":
+            # IMDb serves English at the unprefixed default path and 404s on /en/.
+            url = f"{IMDbHTML._WEB_URL}/title/{imdb_id}/releaseinfo/"
+        else:
+            url = f"{IMDbHTML._WEB_URL}/{language}/title/{imdb_id}/releaseinfo/"
+        html_content = IMDbHTML._request(url, language)
 
         if html_content:
             try:
-                soup = BeautifulSoup(html_content, "html.parser")
-
-                # Map language codes to country names commonly used in IMDb AKAs
-                country_map = {
-                    "de": ["Germany", "Austria", "Switzerland", "West Germany"],
-                    "fr": ["France", "Canada", "Belgium"],
-                    "es": ["Spain", "Mexico", "Argentina"],
-                    "it": ["Italy"],
-                    "pt": ["Portugal", "Brazil"],
-                    "ru": ["Russia", "Soviet Union"],
-                    "ja": ["Japan"],
-                    "hi": ["India"],
-                }
-
-                target_countries = country_map.get(language, [])
-
-                # Find the AKAs list
-                # The structure is a list of items with country names and titles
-                items = soup.find_all("li", class_="ipc-metadata-list__item")
-
-                for item in items:
-                    label_span = item.find(
-                        "span", class_="ipc-metadata-list-item__label"
-                    )
-                    if not label_span:
-                        # Sometimes it's an anchor if it's a link
-                        label_span = item.find(
-                            "a", class_="ipc-metadata-list-item__label"
-                        )
-
-                    if label_span:
-                        country = label_span.get_text(strip=True)
-                        # Check if this country matches our target language
-                        if any(c in country for c in target_countries):
-                            # Found a matching country, get the title
-                            title_span = item.find(
-                                "span",
-                                class_="ipc-metadata-list-item__list-content-item",
-                            )
-                            if title_span:
-                                return title_span.get_text(strip=True)
-
+                title = IMDbHTML._parse_localized_title(html_content, language)
+                if title:
+                    return title
             except Exception as e:
-                debug(f"FlareSolverr localized title parsing failed: {e}")
+                debug(f"IMDb HTML localized title parsing failed for {imdb_id}: {e}")
 
         return None
-
-    @staticmethod
-    def search_titles(query, ttype):
-        url = f"{IMDbFlareSolverr._WEB_URL}/find/?q={quote(query)}&s=tt&ttype={ttype}&ref_=fn_{ttype}"
-        html_content = IMDbFlareSolverr._request(url)
-
-        if html_content:
-            try:
-                soup = BeautifulSoup(html_content, "html.parser")
-                props = soup.find("script", text=re.compile("props"))
-                if props:
-                    details = loads(props.string)
-                    results = details["props"]["pageProps"]["titleResults"]["results"]
-                    mapped_results = []
-                    for result in results:
-                        try:
-                            mapped_results.append(
-                                {
-                                    "id": result["listItem"]["titleId"],
-                                    "titleNameText": result["listItem"]["titleText"],
-                                    "titleReleaseText": result["listItem"].get(
-                                        "releaseYear"
-                                    ),
-                                }
-                            )
-                        except KeyError:
-                            mapped_results.append(
-                                {
-                                    "id": result.get("id"),
-                                    "titleNameText": result.get("titleNameText"),
-                                    "titleReleaseText": result.get("titleReleaseText"),
-                                }
-                            )
-                    return mapped_results
-
-                results = []
-                items = soup.find_all("li", class_="ipc-metadata-list-summary-item")
-                for item in items:
-                    a_tag = item.find("a", class_="ipc-metadata-list-summary-item__t")
-                    if a_tag:
-                        href = a_tag.get("href", "")
-                        id_match = re.search(r"(tt\d+)", href)
-                        if id_match:
-                            results.append(
-                                {
-                                    "id": id_match.group(1),
-                                    "titleNameText": a_tag.get_text(strip=True),
-                                    "titleReleaseText": "",
-                                }
-                            )
-                return results
-
-            except Exception as e:
-                debug(f"FlareSolverr search parsing failed: {e}")
-        return []
 
 
 # =============================================================================
 # Main Functions (Chain of Responsibility)
 # =============================================================================
+
+
+def _empty_metadata():
+    return {
+        "title": None,
+        "year": None,
+        "poster_link": None,
+        "localized": {},
+        "ttl": 0,
+    }
+
+
+def _normalize_localized_title(title, language):
+    """Return one source-facing representation for a localized title."""
+    if not title:
+        return None
+    title = TitleCleaner.sanitize(title)
+    if language.lower() == "de":
+        # Apply the project's canonical German source-query spelling once so
+        # every source receives the same value without source-specific retries.
+        from quasarr.providers.utils import replace_umlauts
+
+        title = replace_umlauts(title)
+    return title
+
+
+def _get_cached_metadata(imdb_id):
+    try:
+        cached_data = _get_db("imdb_metadata").retrieve(imdb_id)
+        if not cached_data:
+            return None
+        metadata = loads(cached_data)
+        return metadata
+    except Exception as e:
+        debug(f"Error retrieving IMDb metadata from DB for {imdb_id}: {e}")
+        return None
+
+
+def _poster_from_arr_record(record):
+    if record.get("remotePoster"):
+        return record["remotePoster"]
+    for image in record.get("images") or []:
+        if image.get("coverType") != "poster":
+            continue
+        poster = image.get("remoteUrl") or image.get("url")
+        if poster and poster.startswith(("http://", "https://")):
+            return poster
+    return None
+
+
+def _localized_titles_from_arr_record(record):
+    """Use only alternate titles carrying an explicit ISO language code."""
+    localized = {}
+    for alternate in record.get("alternateTitles") or []:
+        if not isinstance(alternate, dict):
+            continue
+        language = (
+            alternate.get("languageCode")
+            or alternate.get("iso6391")
+            or alternate.get("language")
+        )
+        if isinstance(language, dict):
+            language = language.get("code") or language.get("iso6391")
+        if not isinstance(language, str) or not re.fullmatch(r"[a-zA-Z]{2}", language):
+            continue
+        title = TitleCleaner.sanitize(alternate.get("title"))
+        if title:
+            localized.setdefault(language.lower(), title)
+
+    # Arr alternate titles carry no language codes, but the original-language
+    # title is language-proven even when the instance localizes its display title.
+    original_language = record.get("originalLanguage")
+    language_name = (
+        original_language.get("name") if isinstance(original_language, dict) else None
+    )
+    code = (
+        IMDbHTML._LANGUAGE_CODES_BY_NAME.get(language_name.lower())
+        if isinstance(language_name, str)
+        else None
+    )
+    if code:
+        original_title = TitleCleaner.sanitize(
+            record.get("originalTitle") or record.get("title")
+        )
+        if original_title:
+            localized.setdefault(code, original_title)
+
+    return localized
+
+
+def _metadata_from_arr_record(record):
+    metadata = _empty_metadata()
+    metadata["title"] = TitleCleaner.sanitize(
+        record.get("title") or record.get("originalTitle")
+    )
+    metadata["year"] = record.get("year")
+    metadata["poster_link"] = _poster_from_arr_record(record)
+    metadata["localized"] = _localized_titles_from_arr_record(record)
+    complete = metadata["title"] and metadata["year"] and metadata["poster_link"]
+    metadata["ttl"] = (
+        datetime.now().timestamp()
+        + timedelta(days=7 if complete else 1).total_seconds()
+    )
+    return metadata
+
+
+def _lookup_arr_record(shared_state, imdb_id, search_category=None):
+    from quasarr.constants import SEARCH_CAT_MOVIES, SEARCH_CAT_SHOWS
+    from quasarr.providers.radarr_api import get_client as get_radarr_client
+    from quasarr.providers.sonarr_api import get_client as get_sonarr_client
+    from quasarr.providers.utils import get_base_search_category_id
+
+    base_search_category = get_base_search_category_id(search_category)
+    if base_search_category == SEARCH_CAT_MOVIES:
+        clients = ((get_radarr_client(shared_state), "movie_lookup_imdb"),)
+    elif base_search_category == SEARCH_CAT_SHOWS:
+        clients = ((get_sonarr_client(shared_state), "series_lookup_imdb"),)
+    else:
+        clients = (
+            (get_radarr_client(shared_state), "movie_lookup_imdb"),
+            (get_sonarr_client(shared_state), "series_lookup_imdb"),
+        )
+
+    for client, method_name in clients:
+        if client is None:
+            continue
+        record = getattr(client, method_name)(imdb_id)
+        if record:
+            return record
+    return None
+
+
+def _refresh_imdb_metadata(
+    shared_state, imdb_id, search_category, cached_metadata=None
+):
+    record = _lookup_arr_record(shared_state, imdb_id, search_category)
+    if not record:
+        return cached_metadata or _empty_metadata(), {}
+
+    metadata = _metadata_from_arr_record(record)
+    arr_localized = dict(metadata["localized"])
+    if cached_metadata:
+        metadata["localized"] = {
+            **cached_metadata.get("localized", {}),
+            **metadata["localized"],
+        }
+    _get_db("imdb_metadata").update_store(imdb_id, dumps(metadata))
+    return metadata, arr_localized
 
 
 def _update_cache(imdb_id, key, value, language=None):
@@ -389,13 +540,7 @@ def _update_cache(imdb_id, key, value, language=None):
         if cached_data:
             metadata = loads(cached_data)
         else:
-            metadata = {
-                "title": None,
-                "year": None,
-                "poster_link": None,
-                "localized": {},
-                "ttl": 0,
-            }
+            metadata = _empty_metadata()
 
         if key == "localized" and language:
             if "localized" not in metadata or not isinstance(
@@ -414,144 +559,60 @@ def _update_cache(imdb_id, key, value, language=None):
         debug(f"Error updating IMDb metadata cache for {imdb_id}: {e}")
 
 
-def get_poster_link(shared_state, imdb_id):
-    # 0. Check Cache (via get_imdb_metadata)
-    imdb_metadata = get_imdb_metadata(imdb_id)
+def get_poster_link(shared_state, imdb_id, search_category=None):
+    imdb_metadata = get_imdb_metadata(shared_state, imdb_id, search_category)
     if imdb_metadata and imdb_metadata.get("poster_link"):
         return imdb_metadata.get("poster_link")
 
-    user_agent = shared_state.values["user_agent"]
-
-    poster = IMDbCDN.get_poster(imdb_id, user_agent)
-    if poster:
-        _update_cache(imdb_id, "poster_link", poster)
-        return poster
-
-    poster = IMDbFlareSolverr.get_poster(imdb_id)
-    if poster:
-        _update_cache(imdb_id, "poster_link", poster)
-        return poster
-
-    debug(f"Could not get poster title for {imdb_id}")
+    debug(f"Could not get poster for {imdb_id} from Radarr or Sonarr")
     return None
 
 
-def get_localized_title(shared_state, imdb_id, language="de"):
-    # 0. Check Cache (via get_imdb_metadata)
-    imdb_metadata = get_imdb_metadata(imdb_id)
-    if imdb_metadata:
+def get_localized_title(shared_state, imdb_id, language="de", search_category=None):
+    imdb_metadata = _get_cached_metadata(imdb_id)
+    cache_is_fresh = bool(
+        imdb_metadata and imdb_metadata.get("ttl", 0) > datetime.now().timestamp()
+    )
+    if cache_is_fresh:
         localized = imdb_metadata.get("localized", {}).get(language)
         if localized:
-            return localized
-        if language == "en" and imdb_metadata.get("title"):
-            return imdb_metadata.get("title")
+            return _normalize_localized_title(localized, language)
+    else:
+        imdb_metadata, arr_localized = _refresh_imdb_metadata(
+            shared_state, imdb_id, search_category, imdb_metadata
+        )
+        localized = arr_localized.get(language)
+        if localized:
+            return _normalize_localized_title(localized, language)
 
-    user_agent = shared_state.values["user_agent"]
-
-    if language == "en":
-        title = IMDbCDN.get_title(imdb_id, user_agent)
-        if title:
-            sanitized_title = TitleCleaner.sanitize(title)
-            _update_cache(imdb_id, "title", sanitized_title)
-            return sanitized_title
-
-    title = IMDbFlareSolverr.get_localized_title(imdb_id, language)
+    title = IMDbHTML.get_localized_title(imdb_id, language)
     if title:
         sanitized_title = TitleCleaner.sanitize(title)
         _update_cache(imdb_id, "localized", sanitized_title, language)
-        return sanitized_title
+        return _normalize_localized_title(sanitized_title, language)
 
-    # Final fallback: Try CDN for English title if localization failed
-    title = IMDbCDN.get_title(imdb_id, user_agent)
-    if title:
-        sanitized_title = TitleCleaner.sanitize(title)
-        _update_cache(imdb_id, "title", sanitized_title)
-        return sanitized_title
-
-    debug(f"Could not get localized title for {imdb_id} in {language}")
+    error(f"Could not get localized title for {imdb_id} in {language}")
     return None
 
 
-def get_imdb_metadata(imdb_id):
-    db = _get_db("imdb_metadata")
-    now = datetime.now().timestamp()
-    cached_metadata = None
-
-    # 0. Check Cache
-    try:
-        cached_data = db.retrieve(imdb_id)
-        if cached_data:
-            cached_metadata = loads(cached_data)
-            if cached_metadata.get("ttl") and cached_metadata["ttl"] > now:
-                return cached_metadata
-    except Exception as e:
-        debug(f"Error retrieving IMDb metadata from DB for {imdb_id}: {e}")
-        cached_metadata = None
-
-    imdb_metadata = {
-        "title": None,
-        "year": None,
-        "poster_link": None,
-        "localized": {},
-        "ttl": 0,
-    }
-
-    # 1. Try API
-    response_json = IMDbAPI.get_title(imdb_id)
-
-    if response_json:
-        imdb_metadata["title"] = TitleCleaner.sanitize(
-            response_json.get("primaryTitle", "")
-        )
-        imdb_metadata["year"] = response_json.get("startYear")
-
-        days = 7 if imdb_metadata.get("title") and imdb_metadata.get("year") else 1
-        imdb_metadata["ttl"] = now + timedelta(days=days).total_seconds()
-
-        try:
-            imdb_metadata["poster_link"] = response_json.get("primaryImage").get("url")
-        except:
-            pass
-
-        akas = IMDbAPI.get_akas(imdb_id)
-        if akas:
-            for aka in akas:
-                if aka.get("language"):
-                    continue
-                if aka.get("country", {}).get("code", "").lower() == "de":
-                    imdb_metadata["localized"]["de"] = TitleCleaner.sanitize(
-                        aka.get("text")
-                    )
-                    break
-
-        db.update_store(imdb_id, dumps(imdb_metadata))
-        return imdb_metadata
-
-    # API Failed. If we have stale cache, return it.
-    if cached_metadata:
+def get_imdb_metadata(shared_state, imdb_id, search_category=None):
+    cached_metadata = _get_cached_metadata(imdb_id)
+    if cached_metadata and cached_metadata.get("ttl", 0) > datetime.now().timestamp():
         return cached_metadata
 
-    # 2. Fallback: Try CDN for basic info (English title, Year, Poster)
-    # We can't get localized titles from CDN, but we can get the rest.
-    # We need a user agent, but this function doesn't receive shared_state.
-    # We'll skip CDN fallback here to avoid circular deps or complexity,
-    # as get_poster_link and get_localized_title handle their own fallbacks.
-    # But to populate the DB, we could try. For now, return empty/partial if API fails.
-
-    return imdb_metadata
+    metadata, _arr_localized = _refresh_imdb_metadata(
+        shared_state, imdb_id, search_category, cached_metadata
+    )
+    return metadata
 
 
 def get_imdb_id_from_title(shared_state, title, language="de"):
-    imdb_id = None
+    from quasarr.providers.radarr_api import get_client as get_radarr_client
+    from quasarr.providers.sonarr_api import get_client as get_sonarr_client
 
-    if re.search(r"S\d{1,3}(E\d{1,3})?", title, re.IGNORECASE):
-        ttype_api = "TV_SERIES"
-        ttype_web = "tv"
-    else:
-        ttype_api = "MOVIE"
-        ttype_web = "ft"
-
+    is_series = bool(re.search(r"S\d{1,3}(E\d{1,3})?", title, re.IGNORECASE))
     title = TitleCleaner.clean(title)
+    lookup_term = title.replace("+", " ")
 
     # 0. Check Search Cache
     db = _get_db("imdb_searches")
@@ -566,30 +627,13 @@ def get_imdb_id_from_title(shared_state, title, language="de"):
     except Exception:
         pass
 
-    user_agent = shared_state.values["user_agent"]
-
-    # 1. Try API
-    search_results = IMDbAPI.search_titles(title)
-    if search_results:
-        imdb_id = _match_result(
-            shared_state, title, search_results, ttype_api, is_api=True
-        )
-
-    # 2. Try CDN (Fallback)
-    if not imdb_id:
-        search_results = IMDbCDN.search_titles(title, ttype_web, language, user_agent)
-        if search_results:
-            imdb_id = _match_result(
-                shared_state, title, search_results, ttype_api, is_api=False
-            )
-
-    # 3. Try FlareSolverr (Last Resort)
-    if not imdb_id:
-        search_results = IMDbFlareSolverr.search_titles(title, ttype_web)
-        if search_results:
-            imdb_id = _match_result(
-                shared_state, title, search_results, ttype_api, is_api=False
-            )
+    if is_series:
+        client = get_sonarr_client(shared_state)
+        search_results = client.series_lookup(lookup_term) if client else []
+    else:
+        client = get_radarr_client(shared_state)
+        search_results = client.movie_lookup(lookup_term) if client else []
+    imdb_id = _match_arr_result(lookup_term, search_results)
 
     # Update Cache
     try:
@@ -605,41 +649,30 @@ def get_imdb_id_from_title(shared_state, title, language="de"):
     return imdb_id
 
 
-def _match_result(shared_state, title, results, ttype_api, is_api=False):
+def _match_arr_result(title, results):
     from quasarr.providers.utils import search_string_in_sanitized_title
 
+    match_title = re.sub(r"\s+(?:19|20)\d{2}$", "", title).strip()
     for result in results:
-        found_title = (
-            result.get("primaryTitle") if is_api else result.get("titleNameText")
-        )
-        found_id = result.get("id")
-
-        if is_api:
-            found_type = result.get("type")
-            if ttype_api == "TV_SERIES" and found_type not in [
-                "tvSeries",
-                "tvMiniSeries",
-            ]:
-                continue
-            if ttype_api == "MOVIE" and found_type not in ["movie", "tvMovie"]:
-                continue
-
-        if search_string_in_sanitized_title(title, found_title):
-            return found_id
-
-    for result in results:
-        found_title = (
-            result.get("primaryTitle") if is_api else result.get("titleNameText")
-        )
-        found_id = result.get("id")
-        if search_string_in_sanitized_title(title, found_title):
-            return found_id
+        imdb_id = result.get("imdbId")
+        if not imdb_id:
+            continue
+        candidate_titles = [result.get("title"), result.get("originalTitle")]
+        for alternate in result.get("alternateTitles") or []:
+            candidate_titles.append(
+                alternate.get("title") if isinstance(alternate, dict) else alternate
+            )
+        if any(
+            candidate and search_string_in_sanitized_title(match_title, candidate)
+            for candidate in candidate_titles
+        ):
+            return imdb_id
 
     return None
 
 
 def get_year(imdb_id):
-    imdb_metadata = get_imdb_metadata(imdb_id)
+    imdb_metadata = _get_cached_metadata(imdb_id)
     if imdb_metadata:
         return imdb_metadata.get("year")
     return None

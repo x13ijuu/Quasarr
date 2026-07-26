@@ -1,7 +1,7 @@
 import inspect
 import unittest
 
-from quasarr.constants import SEARCH_CAT_SHOWS
+from quasarr.constants import SEARCH_CAT_MOVIES, SEARCH_CAT_SHOWS
 from quasarr.providers.html_images import FLAG_SVGS, LANGUAGE_FLAG_EMOJI
 from quasarr.search.sources import get_sources
 from quasarr.search.sources.helpers import get_source_metadata
@@ -115,6 +115,18 @@ class SourceMetadataTests(unittest.TestCase):
         self.assertTrue(metadata["sl"]["requires_flaresolverr"])
         self.assertTrue(metadata["wd"]["requires_flaresolverr"])
 
+    def test_movie_and_tv_categories_derive_arr_requirements(self):
+        for key, source in get_sources().items():
+            with self.subTest(source=key):
+                self.assertEqual(
+                    SEARCH_CAT_MOVIES in source.supported_categories,
+                    source.requires_radarr,
+                )
+                self.assertEqual(
+                    SEARCH_CAT_SHOWS in source.supported_categories,
+                    source.requires_sonarr,
+                )
+
 
 class EditorRenderHelpersTests(unittest.TestCase):
     def test_language_flag_html_carries_swap_hook(self):
@@ -147,8 +159,8 @@ class EditorRenderHelpersTests(unittest.TestCase):
         self.assertIn("🔒 Invite Only", html)
         self.assertIn("🔑 Login Required", html)
         self.assertIn("🛡️ FlareSolverr Required", html)
-        self.assertIn("📡 Radarr Required", html)
-        self.assertIn("📡 Sonarr Required", html)
+        self.assertNotIn("📡 Radarr Required", html)
+        self.assertNotIn("📡 Sonarr Required", html)
         self.assertLess(html.index('data-lang="en"'), html.index("🔒 Invite Only"))
         self.assertLess(html.index("🔒 Invite Only"), html.index("🔑 Login Required"))
         self.assertLess(

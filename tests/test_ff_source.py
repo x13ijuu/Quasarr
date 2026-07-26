@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 
+import json
 import time
 import unittest
 from unittest.mock import ANY, MagicMock, patch
 
 from quasarr.downloads.sources.ff import Source as FfDownloadSource
-from quasarr.providers.cloudflare import FlareSolverrResponse, LazyFlareSolverrSession
+from quasarr.downloads.sources.sf import Source as SfDownloadSource
+from quasarr.providers.cloudflare import (
+    FlareSolverrResponse,
+    LazyFlareSolverrSession,
+    _clear_cloudflare_gate_cache,
+)
 from quasarr.search.sources.ff import Source as FfSearchSource
 from quasarr.search.sources.sf import Source as SfSearchSource
 
@@ -48,6 +54,71 @@ def _build_shared_state(hostnames):
 
 
 class FfSourceTests(unittest.TestCase):
+    def test_search_uses_single_canonical_localized_query(self):
+        host = "host-ff.invalid"
+        ascii_url = f"https://{host}/api/v2/search?q=Synthetic+Uemlaut&ql=DE"
+        movie_url = f"https://{host}/synthetic-movie"
+        api_url = f"https://{host}/api/v1/synthetic-token?filter="
+        requested_urls = []
+
+        movie_html = """
+        <a href="https://www.imdb.invalid/title/tt0000001/">IMDB</a>
+        <script>initMovie('synthetic-token')</script>
+        """
+        api_html = """
+        <div class="entry">
+          <span class="morespec">Synthetic.Uemlaut.2030.1080p.WEB-GROUP</span>
+          <span class="audiotag"><small>Größe:</small> 1 GB</span>
+        </div>
+        """
+
+        def fake_get(url, headers=None, timeout=None):
+            requested_urls.append(url)
+            if url == ascii_url:
+                return FakeResponse(
+                    url,
+                    json_data={
+                        "result": [
+                            {
+                                "title": "Synthetic Uemlaut",
+                                "url_id": "synthetic-movie",
+                            }
+                        ]
+                    },
+                )
+            if url == movie_url:
+                return FakeResponse(url, text=movie_html)
+            if url == api_url:
+                return FakeResponse(url, json_data={"html": api_html})
+            raise AssertionError(f"Unexpected URL requested: {url}")
+
+        with (
+            patch("quasarr.search.sources.ff.requests.get", side_effect=fake_get),
+            patch(
+                "quasarr.search.sources.ff.get_localized_title",
+                return_value="Synthetic Uemlaut",
+            ),
+            patch("quasarr.search.sources.ff.get_recently_searched", return_value={}),
+            patch(
+                "quasarr.search.sources.ff.generate_download_link",
+                return_value="download://synthetic",
+            ),
+            patch("quasarr.search.sources.ff.clear_hostname_issue"),
+        ):
+            result = FfSearchSource().search(
+                _build_shared_state({"ff": host}),
+                time.time(),
+                2000,
+                "tt0000001",
+            )
+
+        self.assertEqual([ascii_url, movie_url, api_url], requested_urls)
+        self.assertEqual(1, len(result))
+        self.assertEqual(
+            "Synthetic.Uemlaut.2030.1080p.WEB-GROUP",
+            result[0]["details"]["title"],
+        )
+
     def test_feed_cross_references_movie_api(self):
         host = "host-ff.invalid"
         feed_url = f"https://{host}/updates/2026-06-24#list"
@@ -180,7 +251,15 @@ class FfSourceTests(unittest.TestCase):
                 return_value=FakeSession(),
             ),
             patch(
-                "quasarr.downloads.sources.ff.detect_crypter_type", return_value=None
+                "quasarr.providers.cloudflare.is_flaresolverr_available"
+            ) as is_available,
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_create_session"
+            ) as create_session,
+            patch("quasarr.providers.cloudflare.flaresolverr_get") as flaresolverr_get,
+            patch(
+                "quasarr.downloads.sources.helpers.redirect.detect_crypter_type",
+                return_value=None,
             ),
         ):
             result = FfDownloadSource().get_download_links(
@@ -196,6 +275,9 @@ class FfSourceTests(unittest.TestCase):
             result,
         )
         self.assertEqual([(external_url, False)], requested_urls)
+        is_available.assert_not_called()
+        create_session.assert_not_called()
+        flaresolverr_get.assert_not_called()
 
 
 class FfSfCloudflareTests(unittest.TestCase):
@@ -203,6 +285,12 @@ class FfSfCloudflareTests(unittest.TestCase):
         ("ff", FfSearchSource),
         ("sf", SfSearchSource),
     )
+
+    def setUp(self):
+        _clear_cloudflare_gate_cache()
+
+    def tearDown(self):
+        _clear_cloudflare_gate_cache()
 
     def test_flaresolverr_response_supports_json_api_payloads(self):
         payload = '{"result": [{"url_id": "synthetic-id"}]}'
@@ -219,6 +307,50 @@ class FfSfCloudflareTests(unittest.TestCase):
                     {"result": [{"url_id": "synthetic-id"}]},
                     response.json(),
                 )
+
+    def test_sf_api_error_is_logged_as_warning(self):
+        host = "host-sf.invalid"
+        search_url = f"https://{host}/api/v2/search?q=Synthetic Title&ql=DE"
+        series_url = f"https://{host}/synthetic-id"
+
+        def fake_get(url, headers=None, timeout=None):
+            if url == search_url:
+                return FakeResponse(
+                    url,
+                    json_data={
+                        "result": [
+                            {"title": "Synthetic Title", "url_id": "synthetic-id"}
+                        ]
+                    },
+                )
+            if url == series_url:
+                return FakeResponse(
+                    url, text="<script>initSeason('synthetic-token', '')</script>"
+                )
+            if f"https://{host}/api/v1/synthetic-token/season/ALL" in url:
+                return FakeResponse(
+                    url,
+                    json_data={"error": True, "message": "synthetic API failure"},
+                )
+            raise AssertionError(f"Unexpected URL requested: {url}")
+
+        with (
+            patch("quasarr.search.sources.sf.requests.get", side_effect=fake_get),
+            patch("quasarr.search.sources.sf.get_recently_searched", return_value={}),
+            patch("quasarr.search.sources.sf.warn") as warn_log,
+        ):
+            result = SfSearchSource().search(
+                _build_shared_state({"sf": host}),
+                time.time(),
+                5000,
+                "Synthetic Title",
+            )
+
+        self.assertEqual([], result)
+        warn_log.assert_called_once()
+        self.assertIn(
+            "SF API error for series 'synthetic-id'", warn_log.call_args.args[0]
+        )
 
     def test_search_keeps_plain_response_without_flaresolverr(self):
         for initials, source_class in self.source_cases:
@@ -454,6 +586,174 @@ class FfSfCloudflareTests(unittest.TestCase):
         self.assertEqual({"links": [], "imdb_id": None}, result)
         destroy_session.assert_called_once_with(ANY, "download-session")
 
+    def test_ff_download_reuses_page_session_for_protected_redirect(self):
+        host = "host-ff.invalid"
+        release_url = f"https://{host}/synthetic-movie"
+        api_url = f"https://{host}/api/v1/synthetic-token?filter="
+        external_url = f"https://{host}/external/synthetic-link"
+        protected_url = "https://protected.invalid/container/ff-synthetic"
+        title = "Synthetic.Movie.2026.1080p.WEB-GROUP"
+        challenge = "<title>Just a moment...</title>"
+        release_html = "<script>initMovie('synthetic-token')</script>"
+        api_html = f"""
+            <div class="entry">
+              <span class="morespec">{title}</span>
+              <a class="dlb row" href="/external/synthetic-link">
+                <div class="col"><span>DDownload</span></div>
+              </a>
+            </div>
+        """
+        plain_urls = []
+        redirect_urls = []
+
+        def plain_get(url, headers=None, timeout=None):
+            plain_urls.append(url)
+            return FakeResponse(url, text=challenge, status_code=403)
+
+        class FakeSession:
+            def get(self, url, allow_redirects=False, timeout=None, headers=None):
+                redirect_urls.append((url, allow_redirects))
+                return FakeResponse(url, text=challenge, status_code=403)
+
+        def solved_get(shared_state, url, timeout=None, session_id=None, **kwargs):
+            if url == release_url:
+                body = release_html
+                final_url = url
+            elif url == api_url:
+                body = json.dumps({"html": api_html})
+                final_url = url
+            elif url == external_url:
+                body = ""
+                final_url = protected_url
+            else:
+                raise AssertionError(f"Unexpected FlareSolverr URL: {url}")
+            return FlareSolverrResponse(final_url, 200, {}, body)
+
+        with (
+            patch("quasarr.downloads.sources.ff.requests.get", side_effect=plain_get),
+            patch(
+                "quasarr.downloads.sources.ff.requests.Session",
+                return_value=FakeSession(),
+            ),
+            patch(
+                "quasarr.providers.cloudflare.is_flaresolverr_available",
+                return_value=True,
+            ),
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_create_session",
+                return_value="shared-download-session",
+            ) as create_session,
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_get",
+                side_effect=solved_get,
+            ) as flaresolverr_get,
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_destroy_session"
+            ) as destroy_session,
+            patch(
+                "quasarr.downloads.sources.helpers.redirect.detect_crypter_type",
+                side_effect=lambda url: "filecrypt" if url == protected_url else None,
+            ),
+        ):
+            result = FfDownloadSource().get_download_links(
+                _build_shared_state({"ff": host}), release_url, [], title, None
+            )
+
+        self.assertEqual(
+            {"links": [[protected_url, "ddownload"]], "imdb_id": None}, result
+        )
+        self.assertEqual([release_url], plain_urls)
+        self.assertEqual([], redirect_urls)
+        create_session.assert_called_once()
+        self.assertEqual(
+            ["shared-download-session"] * 3,
+            [call.kwargs["session_id"] for call in flaresolverr_get.call_args_list],
+        )
+        destroy_session.assert_called_once_with(ANY, "shared-download-session")
+
+    def test_sf_download_reuses_page_session_for_protected_redirect(self):
+        host = "host-sf.invalid"
+        release_url = f"https://{host}/synthetic-show/1"
+        external_url = f"https://{host}/external/synthetic-link"
+        protected_url = "https://protected.invalid/container/sf-synthetic"
+        title = "Synthetic.Show.S01.LANGUAGE.1080p.WEB-GROUP"
+        challenge = "<title>Just a moment...</title>"
+        release_html = "<script>initSeason('synthetic-token', '')</script>"
+        api_html = f"""
+            <div class="details">
+              <div><div><h3>Release</h3></div></div>
+              <small>{title}</small>
+              <a class="dlb row" href="/external/synthetic-link">DDownload</a>
+            </div>
+        """
+        plain_urls = []
+        redirect_urls = []
+
+        def plain_get(url, headers=None, timeout=None):
+            plain_urls.append(url)
+            return FakeResponse(url, text=challenge, status_code=403)
+
+        class FakeSession:
+            def get(self, url, allow_redirects=False, timeout=None, headers=None):
+                redirect_urls.append((url, allow_redirects))
+                return FakeResponse(url, text=challenge, status_code=403)
+
+        def solved_get(shared_state, url, timeout=None, session_id=None, **kwargs):
+            if url == release_url:
+                body = release_html
+                final_url = url
+            elif "/api/v1/synthetic-token/season/1" in url:
+                body = json.dumps({"html": api_html})
+                final_url = url
+            elif url == external_url:
+                body = ""
+                final_url = protected_url
+            else:
+                raise AssertionError(f"Unexpected FlareSolverr URL: {url}")
+            return FlareSolverrResponse(final_url, 200, {}, body)
+
+        with (
+            patch("quasarr.downloads.sources.sf.requests.get", side_effect=plain_get),
+            patch(
+                "quasarr.downloads.sources.sf.requests.Session",
+                return_value=FakeSession(),
+            ),
+            patch(
+                "quasarr.providers.cloudflare.is_flaresolverr_available",
+                return_value=True,
+            ),
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_create_session",
+                return_value="shared-download-session",
+            ) as create_session,
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_get",
+                side_effect=solved_get,
+            ) as flaresolverr_get,
+            patch(
+                "quasarr.providers.cloudflare.flaresolverr_destroy_session"
+            ) as destroy_session,
+            patch(
+                "quasarr.downloads.sources.helpers.redirect.detect_crypter_type",
+                side_effect=lambda url: "filecrypt" if url == protected_url else None,
+            ),
+        ):
+            result = SfDownloadSource().get_download_links(
+                _build_shared_state({"sf": host}), release_url, [], title, None
+            )
+
+        self.assertEqual(
+            {"links": [[protected_url, "filecrypt"]], "imdb_id": None}, result
+        )
+        self.assertEqual([release_url], plain_urls)
+        self.assertEqual([], redirect_urls)
+        create_session.assert_called_once()
+        self.assertEqual(
+            ["shared-download-session"] * 3,
+            [call.kwargs["session_id"] for call in flaresolverr_get.call_args_list],
+        )
+        destroy_session.assert_called_once_with(ANY, "shared-download-session")
+
     def test_search_exception_destroys_lazy_session(self):
         host = "host-sf.invalid"
         challenged = FakeResponse(
@@ -493,6 +793,81 @@ class FfSfCloudflareTests(unittest.TestCase):
 
         self.assertEqual([], result)
         destroy_session.assert_called_once_with(ANY, "failed-session")
+
+
+class NavigationChainResolutionTests(unittest.TestCase):
+    """Quasarr#419: when the solver browser follows a link-protection redirect past
+    the real crypter container into a hostile ad, resolution must return the crypter
+    (recovered from the recorded navigation chain), never the ad page."""
+
+    def test_first_crypter_in_chain_picks_crypter_and_ignores_ad(self):
+        from quasarr.providers.utils import first_crypter_in_chain
+
+        crypter = "https://filecrypt.invalid/Container/ABC.html"
+        chain = json.dumps(
+            [
+                "https://host-ff.invalid/external/x",
+                crypter,
+                "https://www.aliexpress.com/p/popular-landing/aliexpress.html",
+            ]
+        )
+        self.assertEqual(crypter, first_crypter_in_chain(chain))
+        # No crypter walked -> None (caller keeps its own logic).
+        self.assertIsNone(
+            first_crypter_in_chain(
+                json.dumps(
+                    ["https://host-ff.invalid/x", "https://www.aliexpress.com/ad"]
+                )
+            )
+        )
+        # No chain available (non-browser resolution / unsupported build).
+        self.assertIsNone(first_crypter_in_chain(None))
+        self.assertIsNone(first_crypter_in_chain("not-json"))
+
+    def test_browser_chain_yields_crypter_not_ad(self):
+        from quasarr.downloads.sources.helpers.redirect import (
+            resolve_crypter_redirect,
+        )
+
+        crypter = "https://filecrypt.invalid/Container/ABC.html"
+        chain = json.dumps(
+            [
+                "https://host-ff.invalid/external/x",
+                crypter,
+                "https://www.aliexpress.com/p/popular-landing/aliexpress.html",
+            ]
+        )
+
+        class CfSession:
+            # Mimics the solver-browser branch: reports the ad as its final URL, but
+            # exposes the recorded chain that walked through the crypter first.
+            def get(
+                self,
+                url,
+                headers,
+                timeout,
+                request_get=None,
+                document_start_js=None,
+                execute_js=None,
+            ):
+                return FlareSolverrResponse(
+                    url="https://www.aliexpress.com/p/popular-landing/aliexpress.html",
+                    status_code=200,
+                    headers={},
+                    text="ad page",
+                    execute_js_result=chain,
+                )
+
+        for accept_offsite in (True, False):
+            resolved = resolve_crypter_redirect(
+                "https://host-ff.invalid/external/x",
+                "UnitTestAgent/1.0",
+                CfSession(),
+                "ff",
+                host="host-ff.invalid",
+                accept_offsite=accept_offsite,
+            )
+            self.assertEqual(crypter, resolved)
 
 
 if __name__ == "__main__":

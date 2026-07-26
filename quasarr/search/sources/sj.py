@@ -145,7 +145,9 @@ class Source(AbstractSearchSource):
         if not imdb_id:
             return releases
 
-        localized_title = get_localized_title(shared_state, imdb_id, "de")
+        localized_title = get_localized_title(
+            shared_state, imdb_id, "de", search_category
+        )
         if not localized_title:
             info(f"no localized title for IMDb {imdb_id}")
             return releases

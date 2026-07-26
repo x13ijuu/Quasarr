@@ -2,7 +2,7 @@
 
 <img src="https://raw.githubusercontent.com/rix1337/Quasarr/main/Quasarr.png" data-canonical-src="https://raw.githubusercontent.com/rix1337/Quasarr/main/Quasarr.png" width="64" height="64" />
 
-Quasarr connects JDownloader with Radarr, Sonarr, Lidarr and Magazarr. It also decrypts links protected by
+Quasarr connects JDownloader with Radarr, Sonarr, Lidarr and Magazarr. It also handles links protected by
 CAPTCHAs.
 
 [![PyPI version](https://badge.fury.io/py/quasarr.svg)](https://badge.fury.io/py/quasarr)
@@ -14,9 +14,10 @@ indexers. It simply does not know what NZB files are.
 
 Quasarr includes a solution to quickly and easily decrypt protected links.
 [Active monthly Sponsors get access to SponsorsHelper to do so automatically.](https://github.com/rix1337/Quasarr?tab=readme-ov-file#sponsorshelper)
-Alternatively, follow the link from the console output (or notification) to solve CAPTCHAs manually.
-Quasarr will confidently handle the rest. Some CAPTCHA types require [Tampermonkey](https://www.tampermonkey.net/) to be
-installed in your browser.
+Alternatively, follow the link from the console output (or notification) to solve CAPTCHAs in your browser.
+This requires [Tampermonkey](https://www.tampermonkey.net/) and the matching Quasarr userscript. The CAPTCHA page
+guides you through installing both once. Solve the CAPTCHA on the crypter's own page and the userscript sends the
+links back, so Quasarr can confidently handle the rest.
 
 If a link crypter's CAPTCHAs become temporarily unsolvable, you can disable it under **Web UI → Link Protection**.
 Affected releases then fail so your *arr app grabs an alternative instead of stalling.
@@ -37,7 +38,7 @@ Affected releases then fail so your *arr app grabs an alternative instead of sta
 > ⚠️ Quasarr requires at least one valid hostname to start. It does not provide or endorse any specific sources, but
 > community-maintained lists are available:
 
-🔗 **[https://quasarr-hostnames.pages.dev](https://quasarr-hostnames.pages.dev)** — community guide for finding hostnames
+🔗 **[https://quasarr-hostnames.pages.dev](https://quasarr-hostnames.pages.dev)**: community guide for finding hostnames
 
 📋 Alternatively, browse community suggestions via [pastebin search](https://pastebin.com/search?q=hostnames+quasarr) (
 login required).
@@ -233,16 +234,16 @@ Configure notifications in **Web UI → Notifications Configuration**:
 <details>
 <summary>Configure Telegram Bot</summary>
 
-1. **Create a bot** — Open Telegram and search for [@BotFather](https://t.me/BotFather). Send `/newbot` and follow the prompts to choose a name and username for your bot.
-2. **Copy the token** — BotFather will reply with an HTTP API token (e.g. `123456789:ABCdefGHI...`). This is your `TELEGRAM_BOT_TOKEN`.
-3. **Start a chat with the bot** — Open a chat with your new bot and send any message (e.g. `/start`). This is required so the bot can send messages back to you.
-4. **Get your chat ID** — Open the following URL in a browser (replace `<TOKEN>` with your bot token):
+1. **Create a bot**: Open Telegram and search for [@BotFather](https://t.me/BotFather). Send `/newbot` and follow the prompts to choose a name and username for your bot.
+2. **Copy the token**: BotFather will reply with an HTTP API token (e.g. `123456789:ABCdefGHI...`). This is your `TELEGRAM_BOT_TOKEN`.
+3. **Start a chat with the bot**: Open a chat with your new bot and send any message (e.g. `/start`). This is required so the bot can send messages back to you.
+4. **Get your chat ID**: Open the following URL in a browser (replace `<TOKEN>` with your bot token):
    ```
    https://api.telegram.org/bot<TOKEN>/getUpdates
    ```
    Look for `"chat":{"id":` in the JSON response. That number is your `TELEGRAM_CHAT_ID`.
    > **Tip:** For a group chat, add the bot to the group first, send a message in the group, then call `getUpdates`.
-5. **Configure Quasarr** — Open **Notifications** in Quasarr UI.
+5. **Configure Quasarr**: Open **Notifications** in Quasarr UI.
 6. Paste both values into **Telegram → Bot Token / Chat ID**.
 7. Click **Save Notification Settings** and then **Send Telegram Test**.
   
@@ -273,9 +274,8 @@ Most feature requests can be satisfied by:
       Development environment setup for pull requests also lives in [CONTRIBUTING.md](CONTRIBUTING.md).
     - Always reach out on Discord before starting work on a new feature to prevent waste of time.
     - Please follow the existing code style and project structure.
-    - Anti-bot measures must be circumvented fully by Quasarr. Thus, you will need to provide a working solution for new
-      CAPTCHA types by integrating it in the Quasarr Web UI.
-      The simplest CAPTCHA bypass involves creating a Tampermonkey user script.
+    - CAPTCHA solving for new link crypters is done via Tampermonkey userscripts. You will need to provide a working
+      userscript that integrates with the Quasarr Web UI's CAPTCHA flow.
     - Please provide proof of functionality (screenshots/examples) when submitting your pull request.
 
 # SponsorsHelper
