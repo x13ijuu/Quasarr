@@ -4,17 +4,16 @@
 
 import re
 from datetime import datetime
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
 from quasarr.constants import DOWNLOAD_REQUEST_TIMEOUT_SECONDS
 from quasarr.downloads.sources.helpers.abstract_source import AbstractDownloadSource
+from quasarr.downloads.sources.helpers.redirect import resolve_crypter_redirect
 from quasarr.providers.cloudflare import LazyFlareSolverrSession
 from quasarr.providers.hostname_issues import mark_hostname_issue
-from quasarr.providers.log import debug, info
-from quasarr.providers.utils import detect_crypter_type
+from quasarr.providers.log import debug, info, warn
 
 
 class Source(AbstractDownloadSource):
@@ -40,7 +39,7 @@ class Source(AbstractDownloadSource):
 
         # Handle external redirect URLs
         if url.startswith(f"https://{sf}/external"):
-            resolved_url = _resolve_sf_redirect(url, user_agent)
+            resolved_url = _resolve_sf_redirect(url, user_agent, cf_session)
             if not resolved_url:
                 return {"links": [], "imdb_id": None}
             return {"links": [[resolved_url, "filecrypt"]], "imdb_id": None}
@@ -187,7 +186,9 @@ class Source(AbstractDownloadSource):
                             release_url = next(iter(mirrors_dict["season"].values()))
 
                         if release_url:
-                            real_url = _resolve_sf_redirect(release_url, user_agent)
+                            real_url = _resolve_sf_redirect(
+                                release_url, user_agent, cf_session
+                            )
                             if real_url:
                                 # Use the mirror name if we have it, otherwise use "filecrypt"
                                 # We don't know exactly which mirror was picked if we just took the first one
@@ -273,7 +274,7 @@ def _parse_mirrors(base_url, entry):
 
         mirrors = {"name": name, "season": season, "episodes": episodes}
     except Exception as e:
-        info(f"Error parsing mirrors: {e}")
+        warn(f"Error parsing mirrors: {e}")
         mark_hostname_issue(
             Source.initials, "download", str(e) if "e" in dir() else "Download error"
         )
@@ -288,67 +289,11 @@ def _is_last_section_integer(url):
     return None
 
 
-def _resolve_sf_redirect(url, user_agent):
-    """Resolve SF redirects without requesting the final FileCrypt page."""
-    current_url = url
-    visited = set()
-    session = requests.Session()
+def _resolve_sf_redirect(url, user_agent, cf_session):
+    """Resolve manually until blocked, then let the shared browser session follow.
 
-    for _hop in range(8):
-        if current_url in visited:
-            debug(f"SF redirect loop detected for {current_url}")
-            return None
-        visited.add(current_url)
-
-        if detect_crypter_type(current_url) is not None:
-            return current_url
-
-        try:
-            r = session.get(
-                current_url,
-                allow_redirects=False,
-                timeout=DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
-                headers={"User-Agent": user_agent},
-            )
-        except Exception as e:
-            info(f"Error fetching redirected URL for {url}: {e}")
-            mark_hostname_issue(
-                Source.initials,
-                "download",
-                str(e) if "e" in dir() else "Download error",
-            )
-            return None
-
-        location = (r.headers.get("Location") or "").strip()
-        if location:
-            next_url = urljoin(current_url, location)
-            debug(f"Redirected from <d>{current_url}</d> to <d>{next_url}</d>")
-            if "/404.html" in next_url:
-                info(f"Link redirected to 404 page: <d>{next_url}</d>")
-                return None
-            current_url = next_url
-            continue
-
-        final_url = (r.url or current_url).strip()
-        if "/404.html" in final_url:
-            info(f"Link redirected to 404 page: <d>{final_url}</d>")
-            return None
-        if detect_crypter_type(final_url) == "filecrypt":
-            return final_url
-        if r.status_code >= 400:
-            info(
-                f"Error fetching redirected URL for {url}: HTTP {r.status_code} at {final_url}"
-            )
-            mark_hostname_issue(
-                Source.initials,
-                "download",
-                f"HTTP {r.status_code} while resolving redirect",
-            )
-            return None
-        info(
-            f"Blocked attempt to resolve {url}. Your IP may be banned. Try again later."
-        )
-        return None
-
-    debug(f"SF redirect hop limit exceeded for {url}")
-    return None
+    SF only publishes crypter containers, so off-site final URLs are not accepted.
+    """
+    return resolve_crypter_redirect(
+        url, user_agent, cf_session, Source.initials, accept_offsite=False
+    )

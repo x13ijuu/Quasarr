@@ -249,7 +249,7 @@ def setup_arr_routes(app):
                         nzo_ids.append(package_id)
                         return {"status": True, "nzo_ids": nzo_ids}
                     except KeyError:
-                        info(
+                        error(
                             f'Failed to download "{parsed_payload["title"]}" - no package_id returned'
                         )
                         return {"status": True, "nzo_ids": [], "quasarr_error": True}

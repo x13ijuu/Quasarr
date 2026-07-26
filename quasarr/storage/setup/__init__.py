@@ -2,6 +2,11 @@
 # Quasarr
 # Project by https://github.com/rix1337
 
+from quasarr.storage.setup.arr import (
+    missing_arr_client_requirement,
+    select_arr_client_config,
+    split_arr_required_sites,
+)
 from quasarr.storage.setup.common import (
     add_no_cache_headers,
     render_reconnect_success,
@@ -98,6 +103,7 @@ __all__ = [
     "is_sonarr_configured",
     "is_sonarr_skipped",
     "jdownloader_config",
+    "missing_arr_client_requirement",
     "path_config",
     "radarr_config",
     "refresh_filecrypt_setting",
@@ -113,6 +119,8 @@ __all__ = [
     "save_radarr_settings",
     "save_sonarr_settings",
     "save_timeout_slow_mode_settings",
+    "select_arr_client_config",
+    "split_arr_required_sites",
     "send_notification_test",
     "setup_auth",
     "sonarr_config",

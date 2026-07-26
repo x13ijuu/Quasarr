@@ -17,6 +17,7 @@ from quasarr.constants import (
 from quasarr.providers.imdb_metadata import get_imdb_metadata
 from quasarr.providers.log import (
     debug,
+    error,
     get_source_logger,
     info,
     trace,
@@ -53,9 +54,6 @@ def get_search_results(
     if imdb_id and not imdb_id.startswith("tt"):
         imdb_id = f"tt{imdb_id}"
 
-    if imdb_id:
-        get_imdb_metadata(imdb_id)
-
     episode_date = parse_episode_date(season, episode)
     if episode_date:
         season = None
@@ -72,6 +70,23 @@ def get_search_results(
     behavior_search_category = (
         get_search_behavior_category(search_category) or search_category
     )
+
+    if base_search_category == SEARCH_CAT_MOVIES:
+        from quasarr.providers.radarr_api import get_client as get_radarr_client
+
+        if get_radarr_client(shared_state) is None:
+            error("Movie search unavailable: Radarr is not configured")
+            return []
+    elif base_search_category == SEARCH_CAT_SHOWS:
+        from quasarr.providers.sonarr_api import get_client as get_sonarr_client
+
+        if get_sonarr_client(shared_state) is None:
+            error("TV search unavailable: Sonarr is not configured")
+            return []
+
+    if imdb_id:
+        get_imdb_metadata(shared_state, imdb_id, base_search_category)
+
     capability_category = get_search_capability_category(search_category)
     is_custom_search_category = False
     try:

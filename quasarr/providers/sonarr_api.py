@@ -70,6 +70,12 @@ class SonarrAPIClient:
                 return series
         return None
 
+    def series_lookup(self, term):
+        """Return Sonarr series lookup candidates for a free-form title."""
+        if not term:
+            return []
+        return self._get("/series/lookup", params={"term": term}) or []
+
     def wanted(self, kind, page=1, page_size=50):
         """Return a wanted episodes page (``kind`` is ``missing`` or ``cutoff``);
         records include the series."""

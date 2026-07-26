@@ -181,7 +181,9 @@ class Source(AbstractSearchSource):
 
         imdb_id = is_imdb_id(search_string)
         if imdb_id:
-            search_string = get_localized_title(shared_state, imdb_id, "de")
+            search_string = get_localized_title(
+                shared_state, imdb_id, "de", search_category
+            )
             if not search_string:
                 info(f"Could not extract title from IMDb-ID {imdb_id}")
                 return releases

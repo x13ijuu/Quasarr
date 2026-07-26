@@ -73,7 +73,9 @@ class Source(AbstractSearchSource):
         if search_string != "":
             imdb_id = is_imdb_id(search_string)
             if imdb_id:
-                local_title = get_localized_title(shared_state, imdb_id, "en")
+                local_title = get_localized_title(
+                    shared_state, imdb_id, "en", search_category
+                )
                 if not local_title:
                     info(f"No title for IMDb {imdb_id}")
                     return releases

@@ -42,8 +42,9 @@ from quasarr.search.sources.helpers import (
     get_sonarr_required_hostnames,
 )
 from quasarr.storage.config import Config
-from quasarr.storage.setup.radarr import is_radarr_configured, is_radarr_skipped
-from quasarr.storage.setup.sonarr import is_sonarr_configured, is_sonarr_skipped
+from quasarr.storage.setup.arr import missing_arr_client_requirement
+from quasarr.storage.setup.radarr import is_radarr_configured
+from quasarr.storage.setup.sonarr import is_sonarr_configured
 from quasarr.storage.sqlite_database import DataBase
 
 
@@ -92,10 +93,8 @@ def get_api(shared_state_dict, shared_state_lock):
 
         radarr_required = set(get_radarr_required_hostnames())
         radarr_ok = is_radarr_configured(shared_state)
-        radarr_skipped = is_radarr_skipped()
         sonarr_required = set(get_sonarr_required_hostnames())
         sonarr_ok = is_sonarr_configured(shared_state)
-        sonarr_skipped = is_sonarr_skipped()
 
         for site_key in shared_state.values["sites"]:
             shorthand = site_key.lower()
@@ -108,22 +107,15 @@ def get_api(shared_state_dict, shared_state_lock):
                 skip_val = skip_login_db.retrieve(shorthand)
                 if skip_val and str(skip_val).lower() == "true":
                     continue
-            # Skip Radarr-required hostnames if Radarr was skipped
-            if shorthand in radarr_required and radarr_skipped and not radarr_ok:
-                continue
-            # Skip Sonarr-required hostnames if Sonarr was skipped
-            if shorthand in sonarr_required and sonarr_skipped and not sonarr_ok:
-                continue
-
             # This hostname counts toward total
             total_count += 1
 
             # Check if it's working (no issues and dependencies met)
             if shorthand in hostname_issues:
                 continue
-            if shorthand in radarr_required and not radarr_ok:
-                continue
-            if shorthand in sonarr_required and not sonarr_ok:
+            if missing_arr_client_requirement(
+                shorthand, radarr_required, sonarr_required, radarr_ok, sonarr_ok
+            ):
                 continue
             working_count += 1
 
@@ -397,7 +389,7 @@ def get_api(shared_state_dict, shared_state_lock):
                         </div>
                     </div>
                     <p class="api-hint setting-row-hint">
-                        Disable while filecrypt CAPTCHAs are unsolvable — affected releases fail so *arr grabs an alternative. Applies to new grabs only.
+                        Disable while filecrypt CAPTCHAs are unsolvable. Affected releases fail so *arr grabs an alternative. Applies to new grabs only.
                     </p>
                     <div id="filecrypt-status" class="notification-status"></div>
                     <p>{render_button("Save Filecrypt Setting", "primary", {"onclick": "saveFilecryptSettings()", "type": "button", "id": "filecryptSaveBtn"})}</p>
@@ -521,7 +513,7 @@ def get_api(shared_state_dict, shared_state_lock):
                 <summary id="arrSummary">🎬 *arr</summary>
                 <div class="api-settings">
                     <p class="api-hint">
-                        Optional. Used by Quasarr to look up metadata via the *arr APIs.
+                        Required for configured movie or TV sources. Configure the client(s) you use.
                     </p>
 
                     <div class="notification-provider-card">

@@ -143,7 +143,9 @@ class Source(AbstractSearchSource):
             error(f"No IMDb ID found in search string '{search_string}'")
             return releases
 
-        localized_title = get_localized_title(shared_state, imdb_id, "de")
+        localized_title = get_localized_title(
+            shared_state, imdb_id, "de", search_category
+        )
         if not localized_title:
             error(f"No localized title for IMDb {imdb_id}")
             return releases
