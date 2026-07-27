@@ -18,7 +18,12 @@ still emit "Series.E57" so Sonarr's own absolute mapping applies.
 """
 import unittest
 
-from quasarr.downloads.sources.al import apply_arc_season, title_season_conflicts
+from quasarr.downloads.sources.al import (
+    apply_arc_season,
+    details_title_overrides_grabbed,
+    title_season,
+    title_season_conflicts,
+)
 from quasarr.downloads.sources.helpers.anime_title import (
     ReleaseInfo,
     guess_release_title,
@@ -128,3 +133,44 @@ class TitleSeasonTruthTests(unittest.TestCase):
         self.assertFalse(title_season_conflicts("Show.S17E14.German", 17))
         self.assertFalse(title_season_conflicts("Show.E14.German", 17))
         self.assertFalse(title_season_conflicts(None, 17))
+
+
+class DownloadTitleSeasonTests(unittest.TestCase):
+    """
+    Third variant of the same damage, on the download path: Sonarr grabbed the
+    correct "…Blood.War.S17E14", but _check_release re-read the details page and
+    replaced it with AL's cour title "…Blood.War.S03E14". Sonarr then re-mapped
+    the download onto the existing S03E14 (caught live 2026-07-27 — the queue
+    item was removed before it could overwrite a good file).
+    """
+
+    def test_conflicting_details_season_does_not_override(self):
+        self.assertFalse(
+            details_title_overrides_grabbed(
+                "Bleach.Thousand-Year.Blood.War.S17E14.German.ML",
+                "Bleach.Thousand-Year.Blood.War.S03E14.German.ML.GerSub",
+            )
+        )
+
+    def test_same_season_details_title_still_wins(self):
+        # The normal case: details page adds group/quality detail, same season.
+        self.assertTrue(
+            details_title_overrides_grabbed(
+                "Bleach.S17E14.German",
+                "Bleach.S17E14.German.DL.DTS.1080p.BluRay.x264-GRP",
+            )
+        )
+
+    def test_absolute_grabbed_title_keeps_old_behaviour(self):
+        # No season claim in the grabbed title (F4) -> details title may win.
+        self.assertTrue(
+            details_title_overrides_grabbed(
+                "Bleach.E113.German", "Bleach.S06E09.German.DL"
+            )
+        )
+
+    def test_title_season_helper(self):
+        self.assertEqual(17, title_season("Show.S17E14.German"))
+        self.assertEqual(3, title_season("S03E14.German"))
+        self.assertIsNone(title_season("Show.E14.German"))
+        self.assertIsNone(title_season(None))
