@@ -1,0 +1,32 @@
+# pr-tests.yml — Test-Gate für Pull Requests auf die maja-Linie.
+#
+# Lücke bis 2026-07-27: release-fork.yml (mit dem pytest-Gate) triggert nur auf
+# PUSH nach maja/main, also ERST NACH dem Merge. PRs liefen damit ungeprüft —
+# die Absicherung hing daran, dass ein Mensch/Agent die Suite lokal laufen ließ.
+# Dieser Workflow zieht dasselbe Gate auf den PR vor.
+name: PR Tests
+
+on:
+  pull_request:
+    branches:
+      - maja/main
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '**/*.md'
+
+jobs:
+  tests:
+    name: Test suite
+    # Guard: nur im eigenen Fork (upstream hat eigene Workflows)
+    if: github.repository == 'x13ijuu/Quasarr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run tests
+        run: uv run --with pytest python -m pytest tests/ -q
