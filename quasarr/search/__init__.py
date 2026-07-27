@@ -59,6 +59,19 @@ def get_search_results(
         season = None
         episode = None
 
+    # Maja fork: Sonarr rewrites searches into TheXEM SCENE numbering before it
+    # reaches us. For anime whose mapping collapses all seasons into scene season
+    # 1 (InuYasha: TVDB S07E01 -> scene S01E168) the requested pair does not
+    # exist, and the DDL sites — which organise by TVDB seasons ("Staffel 7") —
+    # return nothing. Translate back via Sonarr's own episode data; no-op for
+    # valid pairs and absolute-only searches, fail-open when Sonarr is unset.
+    if imdb_id and season is not None and episode is not None:
+        from quasarr.providers.sonarr_api import resolve_scene_numbering
+
+        translated = resolve_scene_numbering(shared_state, imdb_id, season, episode)
+        if translated:
+            season, episode = translated
+
     # Determine search category if not provided
     if not search_category:
         search_category = determine_search_category(request_from)

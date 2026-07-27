@@ -76,6 +76,17 @@ class SonarrAPIClient:
             return []
         return self._get("/series/lookup", params={"term": term}) or []
 
+    def series_list(self):
+        """Return the series Sonarr actually has added (not a lookup)."""
+        return self._get("/series") or []
+
+    def episodes(self, series_id, season=None):
+        """Return episodes of a series; pass ``season`` to fetch just one season."""
+        params = {"seriesId": series_id}
+        if season is not None:
+            params["seasonNumber"] = season
+        return self._get("/episode", params=params) or []
+
     def wanted(self, kind, page=1, page_size=50):
         """Return a wanted episodes page (``kind`` is ``missing`` or ``cutoff``);
         records include the series."""
@@ -202,3 +213,97 @@ def get_wanted_episodes(shared_state, limit=50):
                     return episodes
 
     return episodes
+
+
+def translate_scene_numbering(season, episode, season_episodes, all_episodes):
+    """Maja fork: map a scene-numbered request back to TVDB season/episode.
+
+    Sonarr applies TheXEM scene mappings BEFORE it queries an indexer. For anime
+    whose mapping collapses every season into scene season 1 with absolute
+    numbering (InuYasha: TVDB S07E01 -> scene S01E168), the request that reaches
+    us is "season 1, episode 168" — a pair that does not exist. DDL sites organise
+    those shows by TVDB-ish seasons ("Staffel 7"), so the scene request finds
+    nothing while the TVDB one finds the whole arc.
+
+    Only fires when the requested pair is genuinely absent AND an episode with
+    that absolute number exists. Valid pairs (Slime S01E02, Bleach S17E14) and
+    absolute-only searches are left untouched.
+
+    Args:
+        season/episode: the requested numbers.
+        season_episodes: Sonarr episodes of that season.
+        all_episodes: every episode of the series.
+
+    Returns:
+        (season, episode) tuple when a translation applies, else None.
+    """
+    if season is None or episode is None:
+        return None
+    try:
+        season = int(season)
+        episode = int(episode)
+    except (TypeError, ValueError):
+        return None
+
+    for candidate in season_episodes or []:
+        if candidate.get("episodeNumber") == episode:
+            return None  # requested pair exists as-is — nothing to translate
+
+    for candidate in all_episodes or []:
+        if candidate.get("absoluteEpisodeNumber") == episode:
+            target_season = candidate.get("seasonNumber")
+            target_episode = candidate.get("episodeNumber")
+            if target_season is None or target_episode is None:
+                return None
+            if (target_season, target_episode) == (season, episode):
+                return None
+            return target_season, target_episode
+
+    return None
+
+
+def resolve_scene_numbering(shared_state, imdb_id, season, episode):
+    """Translate a scene-numbered search request via Sonarr's own episode data.
+
+    Returns (season, episode) when a translation applies, else None. Fail-open:
+    any missing client/series/episode data leaves the request unchanged.
+    """
+    if not imdb_id or season is None or episode is None:
+        return None
+
+    client = get_client(shared_state)
+    if client is None:
+        return None
+
+    try:
+        wanted_imdb = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
+        series_id = None
+        for series in client.series_list():
+            if series.get("imdbId") == wanted_imdb:
+                series_id = series.get("id")
+                break
+        if series_id is None:
+            return None
+
+        # Cheap path first: one season's episodes answer the common case, where
+        # the requested pair exists and nothing needs translating. Only a miss
+        # justifies pulling the full episode list (1000+ entries on long anime).
+        season_episodes = client.episodes(series_id, season=season)
+        if any(
+            candidate.get("episodeNumber") == int(episode)
+            for candidate in season_episodes or []
+        ):
+            return None
+
+        translated = translate_scene_numbering(
+            season, episode, season_episodes, client.episodes(series_id)
+        )
+        if translated:
+            trace(
+                f"scene numbering translated for {wanted_imdb}: "
+                f"S{season}E{episode} -> S{translated[0]}E{translated[1]}"
+            )
+        return translated
+    except Exception as e:
+        trace(f"scene numbering translation failed for {imdb_id}: {e}")
+        return None
