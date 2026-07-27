@@ -18,7 +18,7 @@ still emit "Series.E57" so Sonarr's own absolute mapping applies.
 """
 import unittest
 
-from quasarr.downloads.sources.al import apply_arc_season
+from quasarr.downloads.sources.al import apply_arc_season, title_season_conflicts
 from quasarr.downloads.sources.helpers.anime_title import (
     ReleaseInfo,
     guess_release_title,
@@ -91,3 +91,40 @@ class ApplyArcSeasonTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TitleSeasonTruthTests(unittest.TestCase):
+    """
+    AL splits long arcs into its own cours and names them as seasons: the third
+    Thousand-Year-Blood-War cour ships as "Bleach.Thousand-Year.Blood.War.S03E14"
+    although it is TVDB S17E14. The release is attributed to season 17 correctly,
+    but Sonarr believes the TITLE and mapped it onto S03E14 — an episode that
+    already exists, so a good file would have been overwritten (caught live
+    2026-07-27, queue item removed before it imported).
+    """
+
+    def test_conflicting_title_season_is_dropped(self):
+        info = _info(
+            17, 14, release_title="Bleach.Thousand-Year.Blood.War.S03E14.German.ML"
+        )
+        out = apply_arc_season(info, season=17, season_specific_match=False)
+        self.assertIsNone(out.release_title)
+        self.assertEqual(17, out.season)
+        self.assertIn(".S17E14", guess_release_title("Bleach Thousand-Year Blood War", out))
+
+    def test_matching_title_season_is_kept(self):
+        info = _info(17, 14, release_title="Bleach.S17E14.German.DL")
+        out = apply_arc_season(info, season=17, season_specific_match=False)
+        self.assertEqual("Bleach.S17E14.German.DL", out.release_title)
+
+    def test_absolute_title_carries_no_season_claim(self):
+        # F4: "Bleach.E14" must survive untouched — no S-token, no conflict.
+        info = _info(17, 14, release_title="Bleach.E14.German.DL")
+        out = apply_arc_season(info, season=17, season_specific_match=False)
+        self.assertEqual("Bleach.E14.German.DL", out.release_title)
+
+    def test_conflict_helper(self):
+        self.assertTrue(title_season_conflicts("Show.S03E14.German", 17))
+        self.assertFalse(title_season_conflicts("Show.S17E14.German", 17))
+        self.assertFalse(title_season_conflicts("Show.E14.German", 17))
+        self.assertFalse(title_season_conflicts(None, 17))
