@@ -19,6 +19,7 @@ from quasarr.downloads.sources.al import (
     _guess_title,
     _parse_info_from_download_item,
     _parse_info_from_feed_entry,
+    apply_arc_season,
 )
 from quasarr.providers import shared_state
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
@@ -230,6 +231,12 @@ class Source(AbstractSearchSource):
             xem_name = get_season_name(search_string, season)
 
         results = []
+        # Maja fork (arc-numbering): remember whether the winning search variant
+        # was season-specific (Sonarr's "Staffel N" or the TheXEM arc name). Arc
+        # pages ship episodes numbered relative to the arc without a season marker
+        # in the AL title; only a season-specific match lets us safely stamp the
+        # requested season back onto them (see _apply_arc_season).
+        season_specific_match = False
         for variant in [
             season_title,
             xem_name,
@@ -240,6 +247,7 @@ class Source(AbstractSearchSource):
             if variant is None:
                 continue
 
+            variant_is_season_specific = variant in (season_title, xem_name)
             encoded_search_string = quote_plus(variant)
             year = None
             if imdb_id is not None and variant == search_string:
@@ -283,6 +291,7 @@ class Source(AbstractSearchSource):
                     page_title = ""
 
                 results.append({"url": absolute_redirect_url, "title": page_title})
+                season_specific_match = variant_is_season_specific
                 continue
 
             soup = BeautifulSoup(r.text, "html.parser")
@@ -319,6 +328,7 @@ class Source(AbstractSearchSource):
                     continue
 
                 results.append({"url": url, "title": name})
+                season_specific_match = variant_is_season_specific
 
         for result in results:
             try:
@@ -419,6 +429,14 @@ class Source(AbstractSearchSource):
                                 continue
                         except ValueError:
                             pass
+
+                    # Maja fork (arc-numbering): if this page was found via a
+                    # season-specific variant, stamp the requested season so the
+                    # arc's season-less episode numbers ("Bleach.E14") become
+                    # "Bleach.S17E14" instead of colliding with S01 via absolute.
+                    release_info = apply_arc_season(
+                        release_info, season, season_specific_match
+                    )
 
                     # If no valid title was grabbed from Release Notes, guess the title
                     if release_info.release_title:
