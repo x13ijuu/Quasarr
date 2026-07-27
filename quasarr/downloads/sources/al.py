@@ -807,6 +807,38 @@ def _guess_title(page_title, release_info: ReleaseInfo) -> str:
     return _shared_guess_release_title(page_title, release_info)
 
 
+def apply_arc_season(release_info: ReleaseInfo, season, season_specific_match: bool):
+    """Maja fork (arc-numbering): stamp the requested season onto an arc release.
+
+    anime-loads ships later arcs (Bleach "Thousand-Year Blood War" = TVDB S17,
+    InuYasha "The Final Act" = TVDB S7) under their own title, numbered relative
+    to the arc and WITHOUT a season marker ("Bleach.E14"). F4's absolute path then
+    emits "Bleach.E14", which Sonarr maps E14 -> absolute 14 -> S01E14 (an episode
+    that already exists) and rejects with "Episode wasn't requested".
+
+    When the release was found via a season-specific search variant (Sonarr's
+    "Staffel N" query or the TheXEM arc name) we KNOW the page is exactly that
+    arc, so we stamp the requested season and drop the raw arc title. The rebuilt
+    guess ("Bleach.S17E14...") carries the season, and Sonarr's scene mapping for
+    the arc resolves it to the right episode.
+
+    Mutates and returns release_info. No-op unless a season is requested, the match
+    was season-specific, and the parsed season disagrees with the requested one.
+    """
+    if not season or not season_specific_match:
+        return release_info
+    try:
+        requested = int(season)
+    except (TypeError, ValueError):
+        return release_info
+    if release_info.season != requested:
+        release_info.season = requested
+        # Drop the raw arc title so guess_release_title rebuilds it WITH the season
+        # from the already-parsed components (audio/subs/quality/group are intact).
+        release_info.release_title = None
+    return release_info
+
+
 def _check_release(shared_state, details_html, release_id, title, episode_in_title):
     soup = BeautifulSoup(details_html, "html.parser")
     release_id = _normalize_release_id(release_id)
