@@ -856,18 +856,43 @@ def apply_arc_season(release_info: ReleaseInfo, season, season_specific_match: b
     return release_info
 
 
+def title_season(release_title):
+    """Return the season a title claims via an explicit ``S<NN>`` token, else None."""
+    if not release_title:
+        return None
+    match = re.search(r"(?:^|\.)S(\d{1,4})(?:E\d{1,4})?", release_title, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
 def title_season_conflicts(release_title, season):
     """True when a release title carries an S-number other than ``season``.
 
-    Only an explicit ``.S<NN>`` token counts; absolutely numbered titles
+    Only an explicit ``S<NN>`` token counts; absolutely numbered titles
     ("Bleach.E14") carry no season claim and must stay untouched (F4).
     """
-    if not release_title:
+    claimed = title_season(release_title)
+    if claimed is None:
         return False
-    match = re.search(r"\.S(\d{1,4})(?:E\d{1,4})?", release_title, re.IGNORECASE)
-    if not match:
-        return False
-    return int(match.group(1)) != int(season)
+    return claimed != int(season)
+
+
+def details_title_overrides_grabbed(grabbed_title, details_title):
+    """False when the details page contradicts the season we already grabbed.
+
+    The download path re-reads the release page and normally prefers the "true"
+    title found there. But AL numbers arc cours as seasons of their own, so the
+    details page of TVDB S17E14 says "…Blood.War.S03E14". Taking that over the
+    grabbed title made Sonarr re-map the download onto S03E14 — an episode that
+    exists, i.e. a good file would have been overwritten (caught live
+    2026-07-27; the search path got the same treatment in maja.17).
+
+    Only an explicit season disagreement blocks the override; everything else
+    (added group tags, corrected resolution, absolute titles) still wins.
+    """
+    grabbed_season = title_season(grabbed_title)
+    if grabbed_season is None:
+        return True
+    return not title_season_conflicts(details_title, grabbed_season)
 
 
 def _check_release(shared_state, details_html, release_id, title, episode_in_title):
@@ -918,7 +943,12 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
             )
             real_title = release_info.release_title
             if real_title:
-                if real_title.lower() != title.lower():
+                if not details_title_overrides_grabbed(title, real_title):
+                    info(
+                        f'Keeping grabbed title "{title}" — details page claims a '
+                        f'different season ("{real_title}", AL cour numbering)'
+                    )
+                elif real_title.lower() != title.lower():
                     info(
                         f'Identified true release title "{real_title}" on details page'
                     )
