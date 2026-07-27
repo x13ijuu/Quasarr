@@ -822,21 +822,52 @@ def apply_arc_season(release_info: ReleaseInfo, season, season_specific_match: b
     guess ("Bleach.S17E14...") carries the season, and Sonarr's scene mapping for
     the arc resolves it to the right episode.
 
-    Mutates and returns release_info. No-op unless a season is requested, the match
-    was season-specific, and the parsed season disagrees with the requested one.
+    Second case, same damage from the other side: the release notes may carry a
+    title whose OWN season number is the site's cour count rather than the show's
+    season ("Bleach.Thousand-Year.Blood.War.S03E14" is AL's third TYBW cour, i.e.
+    TVDB S17E14). The release is already correctly attributed to season 17, but
+    Sonarr believes the title and mapped it onto S03E14 — an episode that exists,
+    so a good file would have been overwritten (caught live 2026-07-27). Whenever
+    the title's embedded season contradicts the season we resolved, the title is
+    dropped and rebuilt truthfully.
+
+    Mutates and returns release_info. No-op without a requested season, and for
+    titles/parses that already agree with it.
     """
-    if not season or not season_specific_match:
+    if not season:
         return release_info
     try:
         requested = int(season)
     except (TypeError, ValueError):
         return release_info
-    if release_info.season != requested:
+
+    if season_specific_match and release_info.season != requested:
         release_info.season = requested
         # Drop the raw arc title so guess_release_title rebuilds it WITH the season
         # from the already-parsed components (audio/subs/quality/group are intact).
         release_info.release_title = None
+        return release_info
+
+    if release_info.season == requested and title_season_conflicts(
+        release_info.release_title, requested
+    ):
+        release_info.release_title = None
+
     return release_info
+
+
+def title_season_conflicts(release_title, season):
+    """True when a release title carries an S-number other than ``season``.
+
+    Only an explicit ``.S<NN>`` token counts; absolutely numbered titles
+    ("Bleach.E14") carry no season claim and must stay untouched (F4).
+    """
+    if not release_title:
+        return False
+    match = re.search(r"\.S(\d{1,4})(?:E\d{1,4})?", release_title, re.IGNORECASE)
+    if not match:
+        return False
+    return int(match.group(1)) != int(season)
 
 
 def _check_release(shared_state, details_html, release_id, title, episode_in_title):
