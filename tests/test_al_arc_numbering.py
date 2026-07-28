@@ -108,14 +108,20 @@ class TitleSeasonTruthTests(unittest.TestCase):
     2026-07-27, queue item removed before it imported).
     """
 
-    def test_conflicting_title_season_is_dropped(self):
+    def test_conflicting_title_season_is_rejected(self):
+        # AL part 3 episode 14 is TVDB S17E40 — renaming it to S17E14 would
+        # import the wrong episode under the right name (maja.19 corrects the
+        # maja.17 behaviour). Without a proven offset the release is dropped.
         info = _info(
             17, 14, release_title="Bleach.Thousand-Year.Blood.War.S03E14.German.ML"
         )
-        out = apply_arc_season(info, season=17, season_specific_match=False)
-        self.assertIsNone(out.release_title)
-        self.assertEqual(17, out.season)
-        self.assertIn(".S17E14", guess_release_title("Bleach Thousand-Year Blood War", out))
+        self.assertIsNone(apply_arc_season(info, season=17, season_specific_match=False))
+
+    def test_conflicting_title_rejected_even_on_arc_match(self):
+        info = _info(
+            1, 14, release_title="Bleach.Thousand-Year.Blood.War.S03E14.German.ML"
+        )
+        self.assertIsNone(apply_arc_season(info, season=17, season_specific_match=True))
 
     def test_matching_title_season_is_kept(self):
         info = _info(17, 14, release_title="Bleach.S17E14.German.DL")

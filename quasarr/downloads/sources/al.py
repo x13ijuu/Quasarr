@@ -841,16 +841,19 @@ def apply_arc_season(release_info: ReleaseInfo, season, season_specific_match: b
     except (TypeError, ValueError):
         return release_info
 
+    # A title claiming a DIFFERENT season is cour-relative numbering we cannot
+    # translate: AL splits long arcs into parts and numbers them as seasons, so
+    # "…Blood.War.S03E14" is part 3 episode 14 — TVDB S17E40, NOT S17E14.
+    # Renaming it to the requested season (what maja.17 did) would import the
+    # wrong episode under the right name. Without a proven part offset the only
+    # safe answer is to drop the release; the caller skips it.
+    if title_season_conflicts(release_info.release_title, requested):
+        return None
+
     if season_specific_match and release_info.season != requested:
         release_info.season = requested
-        # Drop the raw arc title so guess_release_title rebuilds it WITH the season
-        # from the already-parsed components (audio/subs/quality/group are intact).
-        release_info.release_title = None
-        return release_info
-
-    if release_info.season == requested and title_season_conflicts(
-        release_info.release_title, requested
-    ):
+        # Title carries no season claim (absolute style) -> rebuild it WITH the
+        # season from the already-parsed components (audio/subs/quality/group).
         release_info.release_title = None
 
     return release_info
