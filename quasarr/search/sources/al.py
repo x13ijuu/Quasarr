@@ -437,6 +437,13 @@ class Source(AbstractSearchSource):
                     release_info = apply_arc_season(
                         release_info, season, season_specific_match
                     )
+                    if release_info is None:
+                        trace(
+                            "Excluding release: title claims a different season "
+                            f"than the requested S{season} (AL cour numbering, "
+                            "cannot be translated safely)"
+                        )
+                        continue
 
                     # If no valid title was grabbed from Release Notes, guess the title
                     if release_info.release_title:
