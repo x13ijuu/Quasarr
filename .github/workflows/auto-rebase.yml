@@ -77,6 +77,13 @@ jobs:
         if: steps.merge.outputs.state == 'merged' && steps.tests.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
+          # GH_REPO ist Pflicht: `gh` löst das Base-Repo eines Forks sonst auf das
+          # PARENT auf (rix1337/Quasarr) — verstärkt durch den upstream-Remote, den
+          # der Merge-Schritt oben anlegt. Ohne das lief der Dispatch am 02./03.08.2026
+          # zweimal in "HTTP 404: workflow release-fork.yml not found" gegen Upstream,
+          # während der Push längst durch war: maja.20/.21 existierten als Commit,
+          # aber ohne Image.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git push origin maja/main
@@ -88,6 +95,10 @@ jobs:
         if: steps.up.outputs.action == 'rebase' && (steps.merge.outputs.state == 'conflict' || steps.tests.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
+          # Hier wiegt die Fork-Auflösung noch schwerer als beim Dispatch: ohne
+          # GH_REPO würde `gh pr create` die maja-Patches als PR an rix1337/Quasarr
+          # richten statt an den eigenen Fork.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           b="maja/auto-rebase-${{ steps.up.outputs.upver }}"
