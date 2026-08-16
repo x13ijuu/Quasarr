@@ -307,3 +307,64 @@ def resolve_scene_numbering(shared_state, imdb_id, season, episode):
     except Exception as e:
         trace(f"scene numbering translation failed for {imdb_id}: {e}")
         return None
+
+
+def resolve_absolute_numbering(shared_state, imdb_id, absolute_episode):
+    """Translate an absolute episode number into (season, episode) via Sonarr.
+
+    Maja fork: Sonarr sends absolute-numbered searches (``E1120``, no season)
+    for ``seriesType=anime``. Quasarr's fan-out drops every source that lacks
+    ``supports_absolute_numbering`` — which is all of them except AL and AT.
+    The German sources that DO carry the content (SF proven: more German-audio
+    hits than AL on the same episode) are therefore never even asked, leaving AL
+    a single point of failure. Its 4.5-day outage in 08/2026 blinded the whole
+    anime pipeline.
+
+    Translating once per search lets those sources answer with the season/episode
+    pair they organise by, without changing what AL/AT receive.
+
+    Fail-open: any missing client/series/episode data returns None, and the
+    caller then behaves exactly as before.
+
+    Returns:
+        (season, episode) tuple, else None.
+    """
+    if not imdb_id or absolute_episode is None:
+        return None
+
+    try:
+        absolute_episode = int(absolute_episode)
+    except (TypeError, ValueError):
+        return None
+
+    client = get_client(shared_state)
+    if client is None:
+        return None
+
+    try:
+        wanted_imdb = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
+        series_id = None
+        for series in client.series_list():
+            if series.get("imdbId") == wanted_imdb:
+                series_id = series.get("id")
+                break
+        if series_id is None:
+            return None
+
+        for candidate in client.episodes(series_id) or []:
+            if candidate.get("absoluteEpisodeNumber") != absolute_episode:
+                continue
+            target_season = candidate.get("seasonNumber")
+            target_episode = candidate.get("episodeNumber")
+            if target_season is None or target_episode is None:
+                return None
+            trace(
+                f"absolute numbering resolved for {wanted_imdb}: "
+                f"E{absolute_episode} -> S{target_season}E{target_episode}"
+            )
+            return target_season, target_episode
+
+        return None
+    except Exception as e:
+        trace(f"absolute numbering resolution failed for {imdb_id}: {e}")
+        return None
