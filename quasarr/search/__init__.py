@@ -2,8 +2,10 @@
 # Quasarr
 # Project by https://github.com/rix1337
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from threading import Lock
@@ -26,6 +28,22 @@ from quasarr.providers.log import (
 from quasarr.search.sources import get_sources
 from quasarr.search.sources.helpers.search_source import AbstractSearchSource
 from quasarr.storage.categories import get_search_category_sources
+
+# Feed results are cached per (source, action, owner category). The previous hardcoded
+# 60s TTL was shorter than a single slow category pass (measured up to 160s), so the
+# cache-family optimization ("2040/2045 served from the 2000 crawl") never fired under
+# load and every *arr RSS sync re-crawled all sources. 600s is safe staleness for RSS
+# data that clients poll every 15-60 minutes.
+FEED_CACHE_TTL_SECONDS = int(os.environ.get("FEED_CACHE_TTL", "600"))
+
+# Wall-clock budget for one executor pass. Sonarr/Radarr abort HTTP requests after a
+# hard, non-configurable 100s — without a budget, one slow source turns the whole
+# response into a client timeout, the client retries, and the retry doubles the crawl
+# load (measured: a single search kept crawling for 53 minutes after the client had
+# disconnected). Returning partial results at 85s keeps the response under the client
+# limit; unfinished sources keep crawling in the background and populate the cache for
+# the next request. Set to 0 to disable.
+SEARCH_RESPONSE_BUDGET_SECONDS = int(os.environ.get("SEARCH_RESPONSE_BUDGET", "85"))
 
 
 def get_search_results(
@@ -292,7 +310,7 @@ def get_search_results(
                 args,
                 kwargs,
                 use_cache=True,
-                ttl=60,
+                ttl=FEED_CACHE_TTL_SECONDS,
                 action="feed",
                 cache_category=cache_key_category,
             )
@@ -403,7 +421,11 @@ class SearchExecutor:
         min_ttl = float("inf")
         bar_str = ""  # Initialize to prevent UnboundLocalError on full cache
 
-        with ThreadPoolExecutor() as executor:
+        # No context manager: `with` would call shutdown(wait=True) and block until
+        # every future finishes — defeating the response budget below. shutdown at the
+        # end uses wait=False so unfinished crawls continue and populate the cache.
+        executor = ThreadPoolExecutor(max_workers=max(len(self.searches), 1))
+        try:
             current_index = 0
             pending_futures = []
 
@@ -427,41 +449,125 @@ class SearchExecutor:
                         min_ttl = ttl_left
                 else:
                     all_cached = False
-                    future = executor.submit(func)
-                    cache_meta = (key, ttl) if use_cache else None
+
+                    # Single-flight: if another request is already crawling this exact
+                    # (source, action, category) key, adopt its future instead of
+                    # crawling everything a second time. Overlapping *arr retries used
+                    # to double the load on every slow feed.
+                    future = None
+                    adopted = False
+                    if use_cache:
+                        with _inflight_lock:
+                            running = _inflight_futures.get(key)
+                            if running is not None and not running.done():
+                                future = running
+                                adopted = True
+                    if adopted:
+                        get_source_logger(source_name).debug(
+                            "Adopting in-flight crawl instead of starting a duplicate"
+                        )
+                    else:
+                        future = executor.submit(func)
+                        if use_cache:
+                            with _inflight_lock:
+                                _inflight_futures[key] = future
+                            future.add_done_callback(_make_inflight_cleanup(key))
+
+                    # The crawl owner writes the cache; adopters only read the result.
+                    cache_meta = (key, ttl) if (use_cache and not adopted) else None
                     future_to_meta[future] = (current_index, cache_meta, source_name)
                     pending_futures.append(future)
                     current_index += 1
 
             if pending_futures:
                 results_badges = [""] * len(pending_futures)
+                remaining = set(pending_futures)
+                budget = (
+                    SEARCH_RESPONSE_BUDGET_SECONDS
+                    if SEARCH_RESPONSE_BUDGET_SECONDS > 0
+                    else None
+                )
 
-                for future in as_completed(pending_futures):
-                    index, cache_meta, source_name = future_to_meta[future]
-                    try:
-                        res = future.result()
-                        if res and len(res) > 0:
-                            badge = f"<bg green><black>{source_name.upper()}</black></bg green>"
-                        else:
-                            get_source_logger(source_name).debug(
-                                "❌ No results returned"
+                try:
+                    for future in as_completed(pending_futures, timeout=budget):
+                        remaining.discard(future)
+                        index, cache_meta, source_name = future_to_meta[future]
+                        try:
+                            res = future.result()
+                            if res and len(res) > 0:
+                                badge = f"<bg green><black>{source_name.upper()}</black></bg green>"
+                            else:
+                                get_source_logger(source_name).debug(
+                                    "❌ No results returned"
+                                )
+                                badge = f"<bg black><white>{source_name.upper()}</white></bg black>"
+
+                            results_badges[index] = badge
+                            results.extend(res)
+                            if cache_meta:
+                                cache_key, cache_ttl = cache_meta
+                                search_cache.set(cache_key, res, ttl=cache_ttl)
+                        except Exception as e:
+                            results_badges[index] = (
+                                f"<bg red><white>{source_name.upper()}</white></bg red>"
                             )
-                            badge = f"<bg black><white>{source_name.upper()}</white></bg black>"
-
-                        results_badges[index] = badge
-                        results.extend(res)
-                        if cache_meta:
-                            cache_key, cache_ttl = cache_meta
-                            search_cache.set(cache_key, res, ttl=cache_ttl)
-                    except Exception as e:
+                            get_source_logger(source_name).warn(f"Search error: {e}")
+                except FuturesTimeoutError:
+                    # Budget exhausted: return what finished. Stragglers keep crawling
+                    # in the background and cache their result for the next request —
+                    # a partial answer inside the client's 100s beats a full answer
+                    # the client never waits for.
+                    for future in remaining:
+                        index, cache_meta, source_name = future_to_meta[future]
                         results_badges[index] = (
-                            f"<bg red><white>{source_name.upper()}</white></bg red>"
+                            f"<bg yellow><black>{source_name.upper()}</black></bg yellow>"
                         )
-                        get_source_logger(source_name).warn(f"Search error: {e}")
+                        get_source_logger(source_name).info(
+                            f"Response budget of {SEARCH_RESPONSE_BUDGET_SECONDS}s "
+                            "exhausted — returning partial results, crawl continues "
+                            "in background"
+                        )
+                        if cache_meta:
+                            future.add_done_callback(
+                                _make_late_cache_writer(cache_meta, source_name)
+                            )
 
                 bar_str = f" [{' '.join(results_badges)}]"
+        finally:
+            executor.shutdown(wait=False)
 
         return results, bar_str, all_cached, min_ttl
+
+
+# In-flight registry for single-flight crawls, keyed like the search cache.
+_inflight_lock = Lock()
+_inflight_futures = {}
+
+
+def _make_inflight_cleanup(key):
+    def _cleanup(future):
+        with _inflight_lock:
+            if _inflight_futures.get(key) is future:
+                del _inflight_futures[key]
+
+    return _cleanup
+
+
+def _make_late_cache_writer(cache_meta, source_name):
+    cache_key, cache_ttl = cache_meta
+
+    def _write(future):
+        try:
+            res = future.result()
+        except Exception as e:
+            get_source_logger(source_name).warn(f"Late search error: {e}")
+            return
+        search_cache.set(cache_key, res, ttl=cache_ttl)
+        get_source_logger(source_name).debug(
+            "Late result cached after response budget"
+        )
+
+    return _write
 
 
 class SearchCache:
