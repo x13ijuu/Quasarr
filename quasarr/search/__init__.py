@@ -145,6 +145,22 @@ def get_search_results(
 
         if base_search_category in [SEARCH_CAT_MOVIES, SEARCH_CAT_SHOWS]:
             args = (shared_state, start_time, behavior_search_category)
+
+            # Maja fork: an absolute-numbered request (episode, no season) is
+            # only answerable by AL/AT, so every other source was dropped below.
+            # The German sources that actually carry the content never got asked
+            # — SF returns more German-audio hits than AL on the same episode.
+            # Resolve the pair ONCE here and hand it to those sources; AL/AT keep
+            # receiving the absolute form they expect. Fail-open: None means the
+            # old behaviour, unchanged.
+            absolute_pair = None
+            if imdb_id and episode and not season:
+                from quasarr.providers.sonarr_api import resolve_absolute_numbering
+
+                absolute_pair = resolve_absolute_numbering(
+                    shared_state, imdb_id, episode
+                )
+
             for source in sources.values():
                 source_logger = get_source_logger(source.initials)
 
@@ -168,14 +184,24 @@ def get_search_results(
                     source_logger.warn("IMDb ID unsupported")
                     continue
 
+                source_season, source_episode = season, episode
+
                 if episode and not season and not source.supports_absolute_numbering:
-                    source_logger.trace("Search with absolute EP number unsupported")
-                    continue
+                    if not absolute_pair:
+                        source_logger.trace(
+                            "Search with absolute EP number unsupported"
+                        )
+                        continue
+                    source_season, source_episode = absolute_pair
+                    source_logger.trace(
+                        f"Absolute E{episode} translated to "
+                        f"S{source_season}E{source_episode}"
+                    )
 
                 kwargs = {
                     "search_string": imdb_id,
-                    "season": season,
-                    "episode": episode,
+                    "season": source_season,
+                    "episode": source_episode,
                 }
 
                 if episode_date:
