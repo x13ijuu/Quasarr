@@ -32,6 +32,22 @@ from quasarr.search.sources.helpers.search_release import SearchRelease
 from quasarr.search.sources.helpers.search_source import AbstractSearchSource
 
 
+def _detail_budget_exhausted(start_time):
+    """Deadline guard for the per-release detail-page fetches below.
+
+    Same pattern as ff.py's _feed_timed_out: the list page is one request, but
+    every release costs one extra detail fetch (IMDb-id extraction) at
+    SEARCH_REQUEST_TIMEOUT_SECONDS each — serial, so 30 releases with a slow
+    host used to add up to 95s feeds. Once the shared budget is spent, releases
+    are still returned, just without the per-release IMDb lookup (the caller's
+    imdb_id fallback covers them).
+    """
+    return (
+        start_time is not None
+        and time.time() - start_time >= FEED_REQUEST_TIMEOUT_SECONDS
+    )
+
+
 class Source(AbstractSearchSource):
     initials = "he"
     language = "en"
@@ -175,24 +191,29 @@ class Source(AbstractSearchSource):
                         debug("missing publish date for {}", title)
 
                 release_imdb_id = None
-                try:
-                    r = requests.get(
-                        source,
-                        headers=headers,
-                        timeout=SEARCH_REQUEST_TIMEOUT_SECONDS,
+                soup = None
+                if _detail_budget_exhausted(start_time):
+                    trace(
+                        f"detail budget exhausted, skipping IMDb lookup for {title}"
                     )
-                    soup = BeautifulSoup(r.content, "html.parser")
-                except Exception as e:
-                    mark_hostname_issue(
-                        self.initials,
-                        search_type,
-                        str(e) if "e" in dir() else "Error occurred",
-                    )
-                release_imdb_id = None
+                else:
+                    try:
+                        r = requests.get(
+                            source,
+                            headers=headers,
+                            timeout=SEARCH_REQUEST_TIMEOUT_SECONDS,
+                        )
+                        soup = BeautifulSoup(r.content, "html.parser")
+                    except Exception as e:
+                        mark_hostname_issue(
+                            self.initials,
+                            search_type,
+                            str(e) if "e" in dir() else "Error occurred",
+                        )
                 try:
                     imdb_link = soup.find(
                         "a", href=re.compile(r"imdb\.com/title/tt\d+", re.IGNORECASE)
-                    )
+                    ) if soup is not None else None
                     if imdb_link:
                         release_imdb_id = re.search(r"tt\d+", imdb_link["href"]).group()
                         if imdb_id and release_imdb_id and release_imdb_id != imdb_id:

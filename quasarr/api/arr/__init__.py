@@ -434,7 +434,12 @@ def setup_arr_routes(app):
                                 f"<r>{removed_duplicates}</r> duplicate entries filtered"
                             )
 
-                        return deduped_results[offset : offset + limit]
+                        # Slice by fetch_limit, not the client limit: *arr apps send
+                        # limit=100 but never paginate (offset is always 0), so slicing
+                        # by `limit` silently discarded ~90% of an already-crawled feed.
+                        # The single-category path returns everything unsliced — this
+                        # keeps both paths consistent.
+                        return deduped_results[offset : offset + fetch_limit]
 
                     if mode in ["movie", "tvsearch"]:
                         imdb_id = getattr(request.query, "imdbid", "")
