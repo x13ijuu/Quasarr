@@ -41,7 +41,13 @@ class FakeResponse:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise AssertionError(f"HTTP {self.status_code}")
+            # Same shape as the real thing: an HTTPError carrying the response,
+            # so production code can branch on e.response.status_code.
+            import requests as _requests
+
+            raise _requests.HTTPError(
+                f"HTTP {self.status_code}", response=self
+            )
 
     def json(self):
         return self._json
@@ -156,7 +162,7 @@ class MxSearchTests(unittest.TestCase):
         with ExitStack() as stack:
             fake_get = build_fake_get(responses)
             stack.enter_context(
-                patch("quasarr.search.sources.mx.requests.get", fake_get)
+                patch("quasarr.search.sources.mx._session.get", fake_get)
             )
             patch_issue_tracking(stack)
             stack.enter_context(
@@ -210,7 +216,7 @@ class MxSearchTests(unittest.TestCase):
         with ExitStack() as stack:
             fake_get = build_fake_get({"search": SHOW_RESULTS, "links": SHOW_LINKS})
             stack.enter_context(
-                patch("quasarr.search.sources.mx.requests.get", fake_get)
+                patch("quasarr.search.sources.mx._session.get", fake_get)
             )
             patch_issue_tracking(stack)
             stack.enter_context(
@@ -245,7 +251,7 @@ class MxSearchTests(unittest.TestCase):
         with ExitStack() as stack:
             fake_get = build_fake_get({"search": SHOW_RESULTS, "links": SHOW_LINKS})
             stack.enter_context(
-                patch("quasarr.search.sources.mx.requests.get", fake_get)
+                patch("quasarr.search.sources.mx._session.get", fake_get)
             )
             patch_issue_tracking(stack)
             stack.enter_context(
@@ -268,7 +274,7 @@ class MxFeedTests(unittest.TestCase):
         with ExitStack() as stack:
             fake_get = build_fake_get({"search": MOVIE_RESULTS, "links": MOVIE_LINKS})
             stack.enter_context(
-                patch("quasarr.search.sources.mx.requests.get", fake_get)
+                patch("quasarr.search.sources.mx._session.get", fake_get)
             )
             patch_issue_tracking(stack)
             stack.enter_context(
@@ -298,7 +304,7 @@ class MxFeedTests(unittest.TestCase):
         with ExitStack() as stack:
             fake_get = build_fake_get({"search": SHOW_RESULTS, "links": SHOW_LINKS})
             stack.enter_context(
-                patch("quasarr.search.sources.mx.requests.get", fake_get)
+                patch("quasarr.search.sources.mx._session.get", fake_get)
             )
             patch_issue_tracking(stack)
             stack.enter_context(
@@ -332,7 +338,7 @@ class MxFeedTests(unittest.TestCase):
         # nothing, without touching Sonarr or the source.
         ss = make_shared_state(radarr=True)  # Sonarr intentionally absent
         with ExitStack() as stack:
-            get = stack.enter_context(patch("quasarr.search.sources.mx.requests.get"))
+            get = stack.enter_context(patch("quasarr.search.sources.mx._session.get"))
             warn = stack.enter_context(patch("quasarr.search.sources.mx.warn"))
             episodes = stack.enter_context(
                 patch("quasarr.search.sources.mx.sonarr_api.get_wanted_episodes")
@@ -347,7 +353,7 @@ class MxFeedTests(unittest.TestCase):
         # TV-only setup (no Radarr client): movie feed warns and yields nothing.
         ss = make_shared_state(sonarr=True)  # Radarr intentionally absent
         with ExitStack() as stack:
-            get = stack.enter_context(patch("quasarr.search.sources.mx.requests.get"))
+            get = stack.enter_context(patch("quasarr.search.sources.mx._session.get"))
             warn = stack.enter_context(patch("quasarr.search.sources.mx.warn"))
             ids = stack.enter_context(
                 patch("quasarr.search.sources.mx.radarr_api.get_wanted_imdb_ids")
@@ -365,7 +371,7 @@ class MxFeedTests(unittest.TestCase):
             raise RuntimeError("mx down")
 
         with ExitStack() as stack:
-            stack.enter_context(patch("quasarr.search.sources.mx.requests.get", boom))
+            stack.enter_context(patch("quasarr.search.sources.mx._session.get", boom))
             stack.enter_context(
                 patch(
                     "quasarr.search.sources.mx.get_localized_title",
@@ -396,7 +402,7 @@ class MxFeedTests(unittest.TestCase):
         with ExitStack() as stack:
             fake_get = build_fake_get({"search": {"results": []}})
             stack.enter_context(
-                patch("quasarr.search.sources.mx.requests.get", fake_get)
+                patch("quasarr.search.sources.mx._session.get", fake_get)
             )
             stack.enter_context(
                 patch(
@@ -454,7 +460,7 @@ class MxSpecialsTests(unittest.TestCase):
         with ExitStack() as stack:
             fake_get = build_fake_get({"search": show_results, "links": show_links})
             stack.enter_context(
-                patch("quasarr.search.sources.mx.requests.get", fake_get)
+                patch("quasarr.search.sources.mx._session.get", fake_get)
             )
             patch_issue_tracking(stack)
             stack.enter_context(
@@ -525,3 +531,167 @@ class MxHelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MxDnsFloodRegressionTests(unittest.TestCase):
+    """Regression tests for the 2026-08-16 DNS-flood incident.
+
+    The MX crawler fired hundreds of bare requests.get() calls per feed run
+    (fresh DNS + TLS each) and re-asked dead decode ids on every crawl (the
+    same 404 id was requested 227x in 24h), tripping AdGuard's per-subnet
+    rate limit and degrading DNS for every container on the host.
+    """
+
+    LINKS_TWO = {
+        "success": True,
+        "all": [
+            {
+                "id": 19320940,  # decode answers 404 (dead upstream link)
+                "quality": "WEB 1080p",
+                "host_name": "1Fichier",
+                "language": "TrueFrench",
+                "size": 1000,
+                "upload_date": "2024-09-05T11:57:38.000000Z",
+            },
+            {
+                "id": 900002,  # healthy link
+                "quality": "WEB 1080p",
+                "host_name": "1Fichier",
+                "language": "TrueFrench",
+                "size": 2000,
+                "upload_date": "2024-09-05T11:57:38.000000Z",
+            },
+        ],
+    }
+
+    def setUp(self):
+        from quasarr.search.sources import mx as mx_module
+
+        self.mx = mx_module
+        mx_module._clear_dead_decode_cache()
+
+    def _fake_get(self):
+        calls = []
+
+        def fake(url, params=None, headers=None, timeout=None):
+            calls.append((url, params or {}))
+            if "/search" in url:
+                return FakeResponse(MOVIE_RESULTS)
+            if "/darkiworld/download/" in url:
+                return FakeResponse(self.LINKS_TWO)
+            if "/darkiworld/decode/19320940" in url:
+                return FakeResponse({}, status_code=404)
+            if "/darkiworld/decode/" in url:
+                return FakeResponse({"embed_url": {"lien": DECODED_URL}})
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        fake.calls = calls
+        return fake
+
+    def _run(self, fake):
+        ss = make_shared_state()
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch("quasarr.search.sources.mx._session.get", fake)
+            )
+            patch_issue_tracking(stack)
+            stack.enter_context(
+                patch(
+                    "quasarr.search.sources.mx.get_localized_title",
+                    return_value="Some Movie",
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "quasarr.search.sources.mx.generate_download_link",
+                    lambda *a, **k: "http://dl/x",
+                )
+            )
+            return SearchSource().search(
+                ss, 0.0, SEARCH_CAT_MOVIES, search_string="tt0000001"
+            )
+
+    def _decode_calls(self, fake, link_id):
+        return [u for u, _ in fake.calls if f"/darkiworld/decode/{link_id}" in u]
+
+    def test_dead_decode_is_skipped_but_healthy_links_survive(self):
+        fake = self._fake_get()
+        releases = self._run(fake)
+        # The 404 must not abort the whole item anymore: the healthy link's
+        # release is still built.
+        self.assertEqual(1, len(releases))
+        self.assertEqual(1, len(self._decode_calls(fake, 19320940)))
+
+        # Second crawl: the dead id is served from the negative cache — the
+        # decode endpoint is NOT asked again, the healthy link still resolves.
+        releases2 = self._run(fake)
+        self.assertEqual(1, len(releases2))
+        self.assertEqual(
+            1,
+            len(self._decode_calls(fake, 19320940)),
+            "dead decode id must not be re-requested within the TTL",
+        )
+        self.assertEqual(2, len(self._decode_calls(fake, 900002)))
+
+    def test_negative_cache_expires(self):
+        fake = self._fake_get()
+        self._run(fake)
+        self.assertEqual(1, len(self._decode_calls(fake, 19320940)))
+
+        # Force expiry, then the id must be retried exactly once more.
+        with self.mx._dead_decode_lock:
+            for key in list(self.mx._dead_decode_until):
+                self.mx._dead_decode_until[key] = 0.0
+        self._run(fake)
+        self.assertEqual(2, len(self._decode_calls(fake, 19320940)))
+
+    def test_non_404_decode_errors_still_raise(self):
+        fake = self._fake_get()
+        real = fake
+
+        def with_503(url, params=None, headers=None, timeout=None):
+            if "/darkiworld/decode/900002" in url:
+                return FakeResponse({}, status_code=503)
+            return real(url, params=params, headers=headers, timeout=timeout)
+
+        with_503.calls = real.calls
+        # 503 is transient — it must NOT be swallowed into the negative cache.
+        releases = self._run(with_503)
+        self.assertEqual([], releases)
+        with self.mx._dead_decode_lock:
+            dead_ids = [k[0] for k in self.mx._dead_decode_until]
+        self.assertNotIn("900002", dead_ids)
+
+    def test_all_traffic_uses_the_pooled_session(self):
+        def bomb(*_a, **_k):
+            raise AssertionError(
+                "bare requests.get bypasses the session pool (DNS flood)"
+            )
+
+        fake = self._fake_get()
+        ss = make_shared_state()
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch("quasarr.search.sources.mx.requests.get", bomb)
+            )
+            stack.enter_context(
+                patch("quasarr.search.sources.mx._session.get", fake)
+            )
+            patch_issue_tracking(stack)
+            stack.enter_context(
+                patch(
+                    "quasarr.search.sources.mx.get_localized_title",
+                    return_value="Some Movie",
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "quasarr.search.sources.mx.generate_download_link",
+                    lambda *a, **k: "http://dl/x",
+                )
+            )
+            releases = SearchSource().search(
+                ss, 0.0, SEARCH_CAT_MOVIES, search_string="tt0000001"
+            )
+        self.assertEqual(1, len(releases))
+        self.assertGreater(len(fake.calls), 0)

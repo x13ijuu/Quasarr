@@ -20,6 +20,7 @@
 import re
 import time
 from datetime import datetime, timezone
+from threading import Lock
 
 import requests
 
@@ -44,6 +45,54 @@ from quasarr.search.sources.helpers.search_source import AbstractSearchSource
 # Bound how many library items a single feed run queries, keeping RSS sync
 # responsive on large libraries.
 FEED_LIBRARY_LIMIT = 50
+
+# One pooled session for every MX request. The crawler fires hundreds of API
+# calls per feed run (search + download + one decode per link, times up to 50
+# seeds); with bare requests.get() each of them resolved DNS and opened a fresh
+# TLS connection — measured 2026-08-16 as ~700 DNS queries/min on the API host,
+# enough to trip AdGuard's per-subnet rate limit and degrade DNS for every
+# container on the box. Keep-alive turns a crawl into a handful of connections
+# (and DNS lookups) instead. Sources are process-wide singletons, so this
+# session lives exactly as long as the crawler does; urllib3's pool is
+# thread-safe under the executor's parallelism.
+_session = requests.Session()
+_session.mount(
+    "https://",
+    requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8),
+)
+
+# Negative cache for dead decode links. The decode endpoint answers 404 for
+# entries whose backing hoster link has been deleted upstream; those never
+# recover within a crawl cycle, yet every feed run re-asked each of them
+# (observed: the same decode id 404ing 227 times in 24 h). Remember dead ids
+# for a few hours instead — in-memory with TTL, same pattern as the
+# Cloudflare gate cache in providers/cloudflare.py. Key: (link_id, media_id).
+DECODE_NEGATIVE_TTL_SECONDS = 6 * 60 * 60
+_dead_decode_lock = Lock()
+_dead_decode_until = {}
+
+
+def _decode_is_dead(key):
+    now = time.monotonic()
+    with _dead_decode_lock:
+        expires = _dead_decode_until.get(key)
+        if expires is None:
+            return False
+        if expires <= now:
+            del _dead_decode_until[key]
+            return False
+        return True
+
+
+def _mark_decode_dead(key):
+    with _dead_decode_lock:
+        _dead_decode_until[key] = time.monotonic() + DECODE_NEGATIVE_TTL_SECONDS
+
+
+def _clear_dead_decode_cache():
+    """Test seam: reset module state between hermetic test cases."""
+    with _dead_decode_lock:
+        _dead_decode_until.clear()
 
 
 class Source(AbstractSearchSource):
@@ -76,7 +125,7 @@ class Source(AbstractSearchSource):
             "Referer": f"https://{host}/",
             "Origin": f"https://{host}",
         }
-        r = requests.get(
+        r = _session.get(
             f"{api_base}{path}", params=params, headers=headers, timeout=timeout
         )
         # The API answers 500 for content it does not index; treat as "no data"
@@ -138,14 +187,33 @@ class Source(AbstractSearchSource):
         if str_id.startswith("http://") or str_id.startswith("https://"):
             return str_id
 
-        data = self._get(
-            api_base,
-            host,
-            f"/darkiworld/decode/{link_id}",
-            {"title_id": media_id},
-            shared_state,
-            timeout,
-        )
+        cache_key = (str_id, str(media_id))
+        if _decode_is_dead(cache_key):
+            debug(f"[mx] skipping dead decode link {link_id} (negative cache)")
+            return None
+
+        try:
+            data = self._get(
+                api_base,
+                host,
+                f"/darkiworld/decode/{link_id}",
+                {"title_id": media_id},
+                shared_state,
+                timeout,
+            )
+        except requests.HTTPError as e:
+            # 404 = the backing hoster link is gone upstream. That state never
+            # recovers within a crawl cycle, and letting it raise used to abort
+            # the WHOLE seed item (discarding its other, healthy links) just to
+            # retry the same dead id on the next run. Remember it and move on.
+            if e.response is not None and e.response.status_code == 404:
+                _mark_decode_dead(cache_key)
+                debug(
+                    f"[mx] decode link {link_id} is 404 — cached as dead for "
+                    f"{DECODE_NEGATIVE_TTL_SECONDS // 3600}h"
+                )
+                return None
+            raise
         if not data:
             return None
         embed_url = data.get("embed_url")
