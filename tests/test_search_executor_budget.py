@@ -72,7 +72,13 @@ class ResponseBudgetTests(unittest.TestCase):
 
         ex = SearchExecutor()
         _add(ex, "fa", fast, category=2000)
-        _add(ex, "sl", slow, category=5000)
+        # Deliberately NOT (sl / 5000): that key belongs to
+        # test_straggler_populates_cache_for_next_request. This test's straggler
+        # finishes on a worker thread after the test returns and writes to the
+        # cache; sharing the key let that write land after the next setUp() had
+        # cleared it, so the next test read "slow" instead of "late". Measured
+        # 6 of 20 runs before the split.
+        _add(ex, "wx", slow, category=5070)
 
         with patch.object(search_module, "SEARCH_RESPONSE_BUDGET_SECONDS", 1):
             started = time.time()
@@ -84,7 +90,7 @@ class ResponseBudgetTests(unittest.TestCase):
             titles = [r["details"]["title"] for r in results]
             self.assertEqual(["fast"], titles, "partial results: fast source only")
             self.assertIn("FA", badges)
-            self.assertIn("SL", badges, "straggler must still appear in the status bar")
+            self.assertIn("WX", badges, "straggler must still appear in the status bar")
             self.assertFalse(all_cached)
         finally:
             release_gate.set()
@@ -152,16 +158,58 @@ class SingleFlightTests(unittest.TestCase):
             _add(ex, "sl", crawl, category=5000)
             out.append(ex.run_all())
 
+        # The second request must reach the single-flight lookup BEFORE the first
+        # crawl finishes, otherwise there is nothing left to adopt. This used to
+        # be a `time.sleep(0.2)` and was the flakiest test in the suite: on a
+        # loaded CI runner 0.2 s is not enough, thread 2 starts its own crawl and
+        # the assertion below reports "1 != 2" — a red run with nothing broken.
+        #
+        # Make it observable instead of hoping. Both threads look the key up in
+        # the in-flight registry; thread 1 finds nothing (it is the owner), thread
+        # 2 finds the running future. A lookup that RETURNS something therefore is
+        # the adoption, and waiting for it is deterministic.
+        registered = threading.Event()
+        adopted = threading.Event()
+
+        class _WatchedRegistry(dict):
+            """Makes the two moments that matter observable.
+
+            The owner REGISTERS its future; a later request finds it and adopts.
+            Waiting on `first_started` is not enough: that fires inside the crawl,
+            which runs after executor.submit() but BEFORE the registration — so
+            the second thread could look up an empty registry and legitimately
+            start its own crawl.
+            """
+
+            def __setitem__(self, key, value):
+                super().__setitem__(key, value)
+                registered.set()
+
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if value is not None:
+                    adopted.set()
+                return value
+
+        watched = _WatchedRegistry(search_module._inflight_futures)
+
         out1, out2 = [], []
-        t1 = threading.Thread(target=run_one, args=(out1,))
-        t1.start()
-        self.assertTrue(first_started.wait(5))
-        t2 = threading.Thread(target=run_one, args=(out2,))
-        t2.start()
-        time.sleep(0.2)  # let the second request adopt the in-flight future
-        release_gate.set()
-        t1.join(10)
-        t2.join(10)
+        with patch.object(search_module, "_inflight_futures", watched):
+            t1 = threading.Thread(target=run_one, args=(out1,))
+            t1.start()
+            self.assertTrue(first_started.wait(5), "erster Crawl ist nie angelaufen")
+            self.assertTrue(
+                registered.wait(5), "erster Request hat sein Future nie registriert"
+            )
+            t2 = threading.Thread(target=run_one, args=(out2,))
+            t2.start()
+            self.assertTrue(
+                adopted.wait(10),
+                "zweiter Request hat die Adoptionsstelle nie erreicht",
+            )
+            release_gate.set()
+            t1.join(10)
+            t2.join(10)
 
         self.assertEqual(1, len(calls), "second request must adopt, not re-crawl")
         for out in (out1, out2):
