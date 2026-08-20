@@ -20,6 +20,9 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Fallback-Kanal: darf Actions keine PRs anlegen, wird stattdessen ein Issue
+  # erzeugt — damit ein gescheiterter Rebase NIE nur im Log steht.
+  issues: write
 
 jobs:
   rebase:
@@ -108,7 +111,54 @@ jobs:
             git add -A && git commit -m "wip: auto-rebase ${{ steps.up.outputs.latest }} (KONFLIKTE — manuell lösen)" || true
           fi
           git push -f origin "$b"
-          gh pr create --base maja/main --head "$b" \
+
+          # `|| echo "PR existiert vermutlich schon"` stand hier frueher und hat JEDEN
+          # Fehler verschluckt — der Step endete mit 0, der Workflow meldete success.
+          # Real gescheitert ist er seit 2026-08-10 an
+          #   "GitHub Actions is not permitted to create or approve pull requests"
+          # (Repo-Setting can_approve_pull_request_reviews=false). Ergebnis: upstream
+          # 4.6.15 und 4.6.16 blieben 10 Tage unbemerkt liegen, taeglich gruen gemeldet.
+          #
+          # Jetzt: "gibt es schon" ist der EINZIGE hinnehmbare Fehler. Alles andere
+          # faellt laut aus, damit der rote Lauf sichtbar wird (ci-watch sieht nur
+          # conclusion=failure).
+          set +e
+          out="$(gh pr create --base maja/main --head "$b" \
             --title "auto-rebase: upstream ${{ steps.up.outputs.latest }} braucht Hand" \
-            --body "Automatischer Rebase gescheitert: ${{ steps.merge.outputs.state == 'conflict' && 'Merge-Konflikt' || 'Tests rot' }}. Bitte manuell lösen — Muster: x13ijuu/Quasarr#1/#2." \
-            || echo "PR existiert vermutlich schon"
+            --body "Automatischer Rebase gescheitert: ${{ steps.merge.outputs.state == 'conflict' && 'Merge-Konflikt' || 'Tests rot' }}. Bitte manuell lösen — Muster: x13ijuu/Quasarr#1/#2." 2>&1)"
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            case "$out" in
+              *"already exists"*|*"A pull request already exists"*)
+                echo "::notice::PR fuer $b existiert bereits — nichts zu tun."
+                ;;
+              *"not permitted to create or approve pull requests"*)
+                # Repo-Setting can_approve_pull_request_reviews=false. Das Signal
+                # trotzdem zustellen — ein Issue braucht nur issues:write, das der
+                # Standard-Token hat. Idempotent ueber den Branch-Namen im Titel,
+                # damit nicht jeder Lauf ein neues Issue anlegt.
+                title="auto-rebase braucht Hand: $b"
+                have="$(gh issue list --state open --search "$title in:title" \
+                          --json number -q '.[0].number' 2>/dev/null || true)"
+                if [ -n "$have" ]; then
+                  echo "::notice::Issue #$have besteht bereits fuer $b."
+                else
+                  gh issue create --title "$title" --body \
+                    "Der automatische Rebase auf upstream ${{ steps.up.outputs.latest }} ist gescheitert (${{ steps.merge.outputs.state == 'conflict' && 'Merge-Konflikt' || 'Tests rot' }}).
+
+          Branch \`$b\` ist gepusht und enthaelt den Stand zum Weiterarbeiten.
+
+          Ein PR konnte nicht erstellt werden: GitHub Actions darf in diesem Repo keine
+          Pull Requests anlegen (Setting \`can_approve_pull_request_reviews\`). Entweder
+          das Setting aktivieren oder den PR von Hand aus \`$b\` oeffnen." \
+                    && echo "::warning::PR nicht erlaubt — stattdessen Issue angelegt fuer $b."
+                fi
+                ;;
+              *)
+                echo "::error::gh pr create fehlgeschlagen (rc=$rc). Branch $b ist gepusht, aber es gibt KEINEN PR — der Rebase braucht Hand."
+                exit "$rc"
+                ;;
+            esac
+          fi
