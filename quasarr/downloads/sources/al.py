@@ -770,7 +770,10 @@ def _parse_info_from_download_item(
             total_episodes = len(episode_links)
             if total_episodes > 0:
                 ep = int(requested_episode)
-                if ep <= total_episodes:
+                # Membership, not count: the link for this episode must EXIST.
+                # `ep <= total_episodes` was off by one (see _tab_offers_episode)
+                # and silently dropped every release for high absolute numbers.
+                if _tab_offers_episode(tab, ep):
                     episode_min = 1
                     episode_max = total_episodes
                     if release_title:
@@ -918,6 +921,42 @@ def _iter_download_tabs(soup):
             yield int(match.group(1)), tab
 
 
+def _episode_loops(tab):
+    """The data-loop values a tab offers, as a set of ints.
+
+    AL numbers these 0-BASED and prefixes the list with a non-numeric "cnl"
+    entry (Click'n'Load, the whole release). So episode N lives at data-loop
+    N-1, and the number of links is NOT the highest episode number.
+    """
+    episodes_div = tab.find("div", class_="episodes")
+    if not episodes_div:
+        return None
+    return {
+        int(a["data-loop"])
+        for a in episodes_div.find_all("a", attrs={"data-loop": re.compile(r"^\d+$")})
+    }
+
+
+def _tab_offers_episode(tab, episode):
+    """True when this tab actually carries a link for ``episode``.
+
+    Replaces the old `episode <= len(links)` test, which conflated a COUNT with
+    a NUMBERING and was off by one. Measured live 2026-08-20 on One Piece:
+    1174 data-loop links, of which 1 is "cnl" -> 1173 numeric, values 0..1173.
+    Episode 1174 lives at loop 1173 and is present, but `1174 <= 1173` is false,
+    so every AL release was discarded and targeted searches returned NOTHING.
+    E1120 still worked (1120 <= 1173) — which is exactly the pattern seen in
+    Sonarr's history: searches found E1120 in August, E1174 never.
+    """
+    loops = _episode_loops(tab)
+    if loops is None:
+        return None  # tab has no per-episode list — caller decides
+    try:
+        return (int(episode) - 1) in loops
+    except (TypeError, ValueError):
+        return None
+
+
 def _episode_link_count(tab):
     """How many episode links this tab offers, or None when it has no list."""
     episodes_div = tab.find("div", class_="episodes")
@@ -1032,12 +1071,17 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
     # episode offset, and that offset is not stated anywhere in the markup. So
     # refuse rather than fetch an arbitrary link.
     if tab is not None and episode_in_title:
-        available = _episode_link_count(tab)
-        if available is not None and not (1 <= int(episode_in_title) <= available):
+        # Same correction as on the search side: ask whether the LINK EXISTS,
+        # not whether the number fits the count. The count version refused
+        # One Piece E1174 (loop 1173 present, but 1174 > 1173 links) and would
+        # have stopped the series entirely instead of only stopping wrong grabs.
+        offers = _tab_offers_episode(tab, episode_in_title)
+        if offers is False:
+            available = _episode_link_count(tab)
             info(
-                f'Refusing "{title}": episode {episode_in_title} is outside '
-                f"release {release_id}, which offers {available} episode link(s) "
-                "- the link index would be arbitrary"
+                f'Refusing "{title}": release {release_id} has no link for '
+                f"episode {episode_in_title} (offers {available} episode link(s), "
+                "data-loop is 0-based) - the link index would be arbitrary"
             )
             return title, 0
 
