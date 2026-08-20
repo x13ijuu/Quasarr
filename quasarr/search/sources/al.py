@@ -32,6 +32,7 @@ from quasarr.providers.utils import (
     get_base_search_category_id,
     get_recently_searched,
     is_imdb_id,
+    normalize_optional_int,
     sanitize_string,
 )
 from quasarr.providers.xem_metadata import get_season_name
@@ -224,11 +225,22 @@ class Source(AbstractSearchSource):
 
         search_string = unescape(search_string)
 
+        # Maja fork (season 0): every season guard below used truthiness, so
+        # season 0 (specials) silently skipped ALL of them - the arc guard, the
+        # season-mismatch exclusion, the parse intent. A specials search then
+        # returned main-season releases, and grabbing one delivered S01 content
+        # (live 2026-08-19, Solo Leveling S00E01 -> S01E01). Normalize once and
+        # compare with "is not None" from here on.
+        requested_season = normalize_optional_int(season)
+
         season_title = None
         xem_name = None
-        if season:
-            season_title = f"{search_string} Staffel {season}"
-            xem_name = get_season_name(search_string, season)
+        # Only >=1 gets a season-specific variant: AL has no "Staffel 0" page and
+        # TheXEM has no arc name for specials, so those queries are guaranteed
+        # misses. The GUARDS below still apply to season 0 - that is the point.
+        if requested_season is not None and requested_season > 0:
+            season_title = f"{search_string} Staffel {requested_season}"
+            xem_name = get_season_name(search_string, requested_season)
 
         results = []
         # Maja fork (arc-numbering): remember whether the winning search variant
@@ -377,7 +389,7 @@ class Source(AbstractSearchSource):
                         content,
                         page_title=title,
                         release_type=valid_type,
-                        requested_season=True if season else False,
+                        requested_season=requested_season is not None,
                         requested_episode=episode,
                     )
                     trace(
@@ -435,13 +447,13 @@ class Source(AbstractSearchSource):
                     # arc's season-less episode numbers ("Bleach.E14") become
                     # "Bleach.S17E14" instead of colliding with S01 via absolute.
                     release_info = apply_arc_season(
-                        release_info, season, season_specific_match
+                        release_info, requested_season, season_specific_match
                     )
                     if release_info is None:
                         trace(
                             "Excluding release: title claims a different season "
-                            f"than the requested S{season} (AL cour numbering, "
-                            "cannot be translated safely)"
+                            f"than the requested S{requested_season} (AL cour "
+                            "numbering, cannot be translated safely)"
                         )
                         continue
 
@@ -457,9 +469,13 @@ class Source(AbstractSearchSource):
                         f"final_release_title='{release_title}'"
                     )
 
-                    if season and release_info.season != int(season):
+                    if (
+                        requested_season is not None
+                        and release_info.season != requested_season
+                    ):
                         trace(
-                            f"Excluding {release_title} due to season mismatch: {release_info.season} != {season}"
+                            f"Excluding {release_title} due to season mismatch: "
+                            f"{release_info.season} != {requested_season}"
                         )
                         continue
 

@@ -318,6 +318,8 @@ class Source(AbstractSearchSource):
         season=None,
         episode=None,
     ):
+        base_search_category = get_base_search_category_id(search_category)
+
         title = get_localized_title(shared_state, imdb_id, "fr", search_category)
         if not title:
             return []
@@ -329,6 +331,23 @@ class Source(AbstractSearchSource):
             return []
 
         media_type = "tv" if match.get("is_series") else "movie"
+
+        # The catalogue's own classification has to match what was asked for.
+        # MX indexes some shows as a single "movie" entry carrying no season or
+        # episode data at all; _build_releases then falls into its movie branch
+        # and stamps the YEAR where the episode tag belongs. The resulting
+        # "Show.2024.1080p…" is not merely useless to Sonarr, it is actively
+        # misread - Sonarr parses the year as S20E24. Measured 2026-08-19 on
+        # one episode search: 85 of 88 results were such titles, every one
+        # rejected with "Unable to identify correct episode(s)". Drop them at
+        # the source instead of flooding the *arr with unmappable noise.
+        if base_search_category == SEARCH_CAT_SHOWS and media_type != "tv":
+            debug(f"[mx] {imdb_id} is not indexed as a series - skipping TV search")
+            return []
+        if base_search_category == SEARCH_CAT_MOVIES and media_type != "movie":
+            debug(f"[mx] {imdb_id} is indexed as a series - skipping movie search")
+            return []
+
         if media_type == "tv" and (season is None or episode is None):
             # The API requires both season and episode for series downloads.
             return []
