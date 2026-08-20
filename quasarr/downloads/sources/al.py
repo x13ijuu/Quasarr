@@ -268,7 +268,9 @@ class Source(AbstractDownloadSource):
                     # failing it (which would make Sonarr blocklist + keep hammering AL).
                     # Anything that doesn't clearly look like a ban stays a normal failure.
                     if looks_like_ban(message) or looks_like_ban(code):
-                        raise HostBannedError(Source.initials, f"code={code}, message={message}")
+                        raise HostBannedError(
+                            Source.initials, f"code={code}, message={message}"
+                        )
                     return {}
 
                 try:
@@ -902,31 +904,143 @@ def details_title_overrides_grabbed(grabbed_title, details_title):
     return not title_season_conflicts(details_title, grabbed_season)
 
 
+def _iter_download_tabs(soup):
+    """Yield (dom_id_number, tab) for every download tab, by its REAL DOM id.
+
+    The search path numbers tabs positionally (1..N in document order) while the
+    download path looks them up as ``id="download_<n>"``. Those two only agree
+    when the site happens to emit a gapless, in-order set. Reading the id back
+    off the element keeps this side honest regardless.
+    """
+    for tab in soup.select("div.tab-pane[id^=download_]"):
+        match = re.match(r"download_(\d+)$", tab.get("id", ""))
+        if match:
+            yield int(match.group(1)), tab
+
+
+def _episode_link_count(tab):
+    """How many episode links this tab offers, or None when it has no list."""
+    episodes_div = tab.find("div", class_="episodes")
+    if not episodes_div:
+        return None
+    return len(episodes_div.find_all("a", attrs={"data-loop": re.compile(r"^\d+$")}))
+
+
+def _resolve_release_id_by_title(soup, title):
+    """Return the tab id whose own title matches ``title``, or 0 when unclear.
+
+    Used for feed grabs, which carry no tab id. Matching is done on the title we
+    already committed to when the release was offered to Sonarr - the one piece
+    of information that is known rather than guessed.
+    """
+    if not title:
+        return 0
+
+    try:
+        page_title_info = soup.find("title").text.strip().rpartition(" (")
+        page_title = page_title_info[0].strip()
+        release_type = (
+            "series" if "serie" in page_title_info[2].strip().lower() else "movie"
+        )
+    except Exception:
+        return 0
+
+    wanted = title.strip().lower()
+    matches = []
+    for tab_id, tab in _iter_download_tabs(soup):
+        try:
+            info_for_tab = _parse_info_from_download_item(
+                tab,
+                soup,
+                page_title=page_title,
+                release_type=release_type,
+                requested_season=release_type == "series",
+                requested_episode=None,
+            )
+        except Exception:
+            continue
+        candidates = {
+            (info_for_tab.release_title or "").strip().lower(),
+            (_guess_title(page_title, info_for_tab) or "").strip().lower(),
+        }
+        candidates.discard("")
+        if wanted in candidates:
+            matches.append(tab_id)
+
+    if len(matches) == 1:
+        info(f'Resolved feed grab "{title}" to release {matches[0]} by title match')
+        return matches[0]
+
+    info(
+        f'Refusing feed grab "{title}": {"no" if not matches else len(matches)} '
+        "tabs on the details page carry this title - cannot tell which release "
+        "was meant"
+    )
+    return 0
+
+
 def _check_release(shared_state, details_html, release_id, title, episode_in_title):
     soup = BeautifulSoup(details_html, "html.parser")
     release_id = _normalize_release_id(release_id)
 
     if release_id == 0:
-        info(
-            "Feed download detected, hard-coding release_id to 1 to achieve successful download"
-        )
-        release_id = 1
-        # The following logic works, but the highest release ID sometimes does not have the desired episode
+        # Maja fork: feed grabs carry no usable tab id. _get_release_id() only
+        # finds one when the feed block literally says "Release N:", so RSS
+        # entries arrive here as 0.
         #
-        # If download was started from the feed, the highest download id is typically the best option
-        # panes = soup.find_all("div", class_="tab-pane")
-        # max_id = None
-        # for pane in panes:
-        #     pane_id = pane.get("id", "")
-        #     match = re.match(r"download_(\d+)$", pane_id)
-        #     if match:
-        #         num = int(match.group(1))
-        #         if max_id is None or num > max_id:
-        #             max_id = num
-        # if max_id:
-        #     release_id = max_id
+        # Upstream then hard-coded tab 1 "to achieve successful download" -
+        # success meaning "something downloaded", not "the ordered thing". On a
+        # page whose first tab is a batch collection that is simply the wrong
+        # release. Proven live 2026-08-20: four One Piece episodes (abs 1169,
+        # 1170, 1171, 1174) were each grabbed from RSS as
+        # "…German.ML.GerSub.EngSub.1080p.WEB-DL" and each came back as a 720p
+        # japanese-audio CR.WEB file off tab 1. All four RSS grabs were wrong;
+        # none of the three search-path grabs (which carry a real tab id) were.
+        #
+        # Resolve it honestly instead: the grabbed title is known, so find the
+        # tab that actually carries it.
+        #
+        # When that does not produce a unique match we fall back to the old
+        # tab-1 behaviour ON PURPOSE, for now. The feed builds its title from
+        # less data than the details page (that is why upstream re-guesses at
+        # all), so a strict match would refuse feed grabs that work today - the
+        # Bleach RSS grabs on 2026-08-20 03:42/03:43 landed correctly this way.
+        # Per ADR 0025 this stays scan-only until the warn counter shows the
+        # match is reliable; the bounds check below is what actually stops the
+        # One Piece failure in the meantime.
+        matched = _resolve_release_id_by_title(soup, title)
+        if matched:
+            release_id = matched
+        else:
+            release_id = 1
+            info(
+                f'Feed grab "{title}": no unique tab match, falling back to '
+                "release 1 (scan-only - would refuse once enforced)"
+            )
 
     tab = soup.find("div", class_="tab-pane", id=f"download_{release_id}")
+
+    # Maja fork: the episode is picked POSITIONALLY - get_download_links() sends
+    # `selection = episode_in_title - 1` as an index into this tab's
+    # `div.episodes a[data-loop]` list. That is only meaningful when the tab
+    # numbers its episodes from 1. For an absolutely numbered grab ("E1174")
+    # against a ranged batch tab it is nonsense (index 1173), and for "S00E01"
+    # it silently resolves to the first link of a main-season tab - the Solo
+    # Leveling case, which maja.25 documented but did not prevent.
+    #
+    # We cannot translate an out-of-range index without knowing the tab's own
+    # episode offset, and that offset is not stated anywhere in the markup. So
+    # refuse rather than fetch an arbitrary link.
+    if tab is not None and episode_in_title:
+        available = _episode_link_count(tab)
+        if available is not None and not (1 <= int(episode_in_title) <= available):
+            info(
+                f'Refusing "{title}": episode {episode_in_title} is outside '
+                f"release {release_id}, which offers {available} episode link(s) "
+                "- the link index would be arbitrary"
+            )
+            return title, 0
+
     if tab:
         try:
             # We re-guess the title from the details page
