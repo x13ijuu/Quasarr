@@ -668,7 +668,9 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                 else:
                     moving = True  # finished downloading, not yet at destination
 
-            location = "queue" if moving else ("history" if error or finished else "queue")
+            location = (
+                "queue" if moving else ("history" if error or finished else "queue")
+            )
 
             trace(
                 f"Package '{package_name}' -> location={location}, "
@@ -1031,6 +1033,22 @@ def run_history_hygiene(shared_state):
     folders — so no timestamp bookkeeping is needed.
 
     No-op unless COMPLETED_DIR is set (upstream behaviour).
+
+    The reported `storage` cannot be used to decide this. It only points at
+    COMPLETED_DIR while the folder still EXISTS there (see the final_storage
+    branch in get_packages); the moment cleanup removes it, storage falls back
+    to the downloader's working dir. Filtering on
+    `storage.startswith(completed_dir)` therefore excluded exactly the entries
+    this function exists to remove - the trigger condition and the exclusion
+    condition were the same event, so the entry lingered forever and Sonarr kept
+    an unclosable queue item ("No files found are eligible for import").
+    Observed live 2026-08-20 on a One Piece package.
+
+    So judge by the filesystem instead, from either storage shape: not at the
+    destination AND provably gone from the working dir. package_source_gone()
+    keeps the 2026-07-07 reconcile race shut - it returns False for anything it
+    cannot prove (unset env, unmounted dir, foreign path, folder still holding
+    files), so a package that is merely mid-move is never touched.
     """
     completed_dir = completed_destination()
     if not completed_dir:
@@ -1045,20 +1063,40 @@ def run_history_hygiene(shared_state):
         if item.get("status") != "Completed":
             continue
         storage = item.get("storage") or ""
-        # Only manage entries that point at our completed destination.
-        if not storage.startswith(completed_dir):
+        if not storage:
             continue
-        if not os.path.isdir(storage):
-            pid = item.get("nzo_id")
-            if pid:
-                debug(f"history hygiene: removing completed {pid} (folder gone: {storage})")
-                try:
-                    delete_package(shared_state, pid, missing_ok=True)
-                    removed += 1
-                except Exception as e:
-                    debug(f"history hygiene: delete {pid} failed: {e}")
+        present, final_path = package_at_destination(storage, completed_dir)
+        if present:
+            # Still waiting to be imported (or imported but not cleaned up yet).
+            continue
+
+        root = completed_dir.rstrip("/")
+        if storage == root or storage.startswith(root + "/"):
+            # Storage already names the destination, so its absence is the whole
+            # signal (the pre-existing behaviour, kept as-is).
+            if os.path.isdir(storage):
+                continue
+        elif not package_source_gone(storage):
+            # Storage names the downloader's working dir - or something we do not
+            # recognise. Only act when the working copy is PROVABLY gone; anything
+            # unprovable stays untouched. This is the 2026-07-07 race guard.
+            continue
+
+        pid = item.get("nzo_id")
+        if pid:
+            debug(
+                f"history hygiene: removing completed {pid} "
+                f"(gone from {final_path} and from the working dir)"
+            )
+            try:
+                delete_package(shared_state, pid, missing_ok=True)
+                removed += 1
+            except Exception as e:
+                debug(f"history hygiene: delete {pid} failed: {e}")
     if removed:
-        info(f"history hygiene: removed {removed} completed entr{'y' if removed == 1 else 'ies'} (imported + cleaned up)")
+        info(
+            f"history hygiene: removed {removed} completed entr{'y' if removed == 1 else 'ies'} (imported + cleaned up)"
+        )
     return removed
 
 
