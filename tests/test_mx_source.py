@@ -45,9 +45,7 @@ class FakeResponse:
             # so production code can branch on e.response.status_code.
             import requests as _requests
 
-            raise _requests.HTTPError(
-                f"HTTP {self.status_code}", response=self
-            )
+            raise _requests.HTTPError(f"HTTP {self.status_code}", response=self)
 
     def json(self):
         return self._json
@@ -428,6 +426,79 @@ class MxFeedTests(unittest.TestCase):
         clear.assert_not_called()
 
 
+class MxCategoryClassificationTests(unittest.TestCase):
+    """MX's own is_series flag has to agree with the category being searched.
+
+    Some shows are indexed as a single "movie" entry with no season/episode data
+    at all. _build_releases then takes its movie branch and stamps the YEAR where
+    the episode tag belongs, producing "Some.Show.2024.1080p…". Sonarr does not
+    merely fail to map that - it parses the year as S20E24. Measured live on
+    2026-08-19: 85 of 88 results for one episode search were such titles, every
+    one rejected with "Unable to identify correct episode(s)".
+    """
+
+    MISCLASSIFIED_SHOW = {
+        "results": [
+            {
+                "id": 444,
+                "name": "Some Show",
+                "imdb_id": "tt0000004",
+                "is_series": False,
+                "release_date": "2024-01-07T00:00:00.000000Z",
+            }
+        ]
+    }
+
+    def _search(self, results, category, **kwargs):
+        ss = make_shared_state()
+        with ExitStack() as stack:
+            fake_get = build_fake_get({"search": results, "links": MOVIE_LINKS})
+            stack.enter_context(
+                patch("quasarr.search.sources.mx._session.get", fake_get)
+            )
+            patch_issue_tracking(stack)
+            stack.enter_context(
+                patch(
+                    "quasarr.search.sources.mx.get_localized_title",
+                    return_value="Some Show",
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "quasarr.search.sources.mx.generate_download_link",
+                    lambda *a, **k: "http://dl",
+                )
+            )
+            # MOVIE_RESULTS leads with a decoy carrying imdb_id None; search
+            # with the first entry that actually has one.
+            imdb_id = next(r["imdb_id"] for r in results["results"] if r.get("imdb_id"))
+            releases = SearchSource().search(
+                ss, 0.0, category, search_string=imdb_id, **kwargs
+            )
+        return releases, fake_get
+
+    def test_movie_entry_is_not_offered_to_a_tv_search(self):
+        releases, fake_get = self._search(
+            self.MISCLASSIFIED_SHOW, SEARCH_CAT_SHOWS, season=0, episode=1
+        )
+        self.assertEqual([], releases)
+        # Rejected before any link/decode traffic - the noise cost is the point.
+        self.assertFalse(any("/darkiworld/download/" in c[0] for c in fake_get.calls))
+
+    def test_series_entry_is_not_offered_to_a_movie_search(self):
+        releases, fake_get = self._search(SHOW_RESULTS, SEARCH_CAT_MOVIES)
+        self.assertEqual([], releases)
+        self.assertFalse(any("/darkiworld/download/" in c[0] for c in fake_get.calls))
+
+    def test_matching_classification_still_searches(self):
+        # Guard against over-blocking: a real movie in a movie search is untouched.
+        releases, fake_get = self._search(MOVIE_RESULTS, SEARCH_CAT_MOVIES)
+        self.assertEqual(1, len(releases))
+        self.assertTrue(
+            any("/darkiworld/download/movie/" in c[0] for c in fake_get.calls)
+        )
+
+
 class MxSpecialsTests(unittest.TestCase):
     def test_season_zero_special_is_tagged(self):
         # Sonarr can want specials (season 0); the release title must still
@@ -591,9 +662,7 @@ class MxDnsFloodRegressionTests(unittest.TestCase):
     def _run(self, fake):
         ss = make_shared_state()
         with ExitStack() as stack:
-            stack.enter_context(
-                patch("quasarr.search.sources.mx._session.get", fake)
-            )
+            stack.enter_context(patch("quasarr.search.sources.mx._session.get", fake))
             patch_issue_tracking(stack)
             stack.enter_context(
                 patch(
@@ -671,12 +740,8 @@ class MxDnsFloodRegressionTests(unittest.TestCase):
         fake = self._fake_get()
         ss = make_shared_state()
         with ExitStack() as stack:
-            stack.enter_context(
-                patch("quasarr.search.sources.mx.requests.get", bomb)
-            )
-            stack.enter_context(
-                patch("quasarr.search.sources.mx._session.get", fake)
-            )
+            stack.enter_context(patch("quasarr.search.sources.mx.requests.get", bomb))
+            stack.enter_context(patch("quasarr.search.sources.mx._session.get", fake))
             patch_issue_tracking(stack)
             stack.enter_context(
                 patch(
