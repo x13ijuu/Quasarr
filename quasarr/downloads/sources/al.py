@@ -44,7 +44,10 @@ from quasarr.providers.sessions.al import (
     unwrap_flaresolverr_body,
 )
 from quasarr.providers.statistics import StatsHelper
-from quasarr.providers.utils import is_flaresolverr_available
+from quasarr.providers.utils import (
+    is_flaresolverr_available,
+    normalize_optional_int,
+)
 
 
 class Source(AbstractDownloadSource):
@@ -833,12 +836,13 @@ def apply_arc_season(release_info: ReleaseInfo, season, season_specific_match: b
 
     Mutates and returns release_info. No-op without a requested season, and for
     titles/parses that already agree with it.
+
+    Season 0 (specials) is a REQUESTED season like any other - guarding with
+    truthiness made specials skip the conflict check below, which is how a
+    S00E01 request came back with S01 content (live 2026-08-19).
     """
-    if not season:
-        return release_info
-    try:
-        requested = int(season)
-    except (TypeError, ValueError):
+    requested = normalize_optional_int(season)
+    if requested is None:
         return release_info
 
     # A title claiming a DIFFERENT season is cour-relative numbering we cannot
@@ -971,6 +975,24 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
                         release_info.season = None
 
                 guessed_title = _guess_title(page_title, release_info)
+                # Maja fork (season 0): unlike the release-notes branch above,
+                # this one had NO season-conflict guard. The guess describes the
+                # exact tab+link selection we are about to fetch, so a season
+                # that contradicts the grabbed title means the bytes are not what
+                # was asked for - renaming to the guess imports the wrong episode
+                # under a plausible name, keeping the grabbed name imports it
+                # under a lying one. Neither is acceptable: refuse the grab.
+                # (Live 2026-08-19: "…S00E01…-DK" was silently rewritten to
+                # "…S01E01…-DK" and delivered season-1 files.)
+                if guessed_title and not details_title_overrides_grabbed(
+                    title, guessed_title
+                ):
+                    info(
+                        f'Refusing download of "{title}": the details page '
+                        f'resolves this release to "{guessed_title}" - the '
+                        "seasons contradict each other"
+                    )
+                    return title, 0
                 if guessed_title and guessed_title.lower() != title.lower():
                     info(
                         f'Adjusted guessed release title to "{guessed_title}" from details page'
