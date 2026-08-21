@@ -5,7 +5,7 @@
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from threading import Lock
@@ -15,6 +15,7 @@ from quasarr.constants import (
     SEARCH_CAT_MOVIES,
     SEARCH_CAT_MUSIC,
     SEARCH_CAT_SHOWS,
+    SEARCH_FANOUT_DEADLINE_SECONDS,
 )
 from quasarr.providers.imdb_metadata import get_imdb_metadata
 from quasarr.providers.log import (
@@ -36,15 +37,6 @@ from quasarr.storage.categories import get_search_category_sources
 # data that clients poll every 15-60 minutes.
 FEED_CACHE_TTL_SECONDS = int(os.environ.get("FEED_CACHE_TTL", "600"))
 
-# Wall-clock budget for one executor pass. Sonarr/Radarr abort HTTP requests after a
-# hard, non-configurable 100s — without a budget, one slow source turns the whole
-# response into a client timeout, the client retries, and the retry doubles the crawl
-# load (measured: a single search kept crawling for 53 minutes after the client had
-# disconnected). Returning partial results at 85s keeps the response under the client
-# limit; unfinished sources keep crawling in the background and populate the cache for
-# the next request. Set to 0 to disable.
-SEARCH_RESPONSE_BUDGET_SECONDS = int(os.environ.get("SEARCH_RESPONSE_BUDGET", "85"))
-
 
 def get_search_results(
     shared_state,
@@ -56,6 +48,7 @@ def get_search_results(
     episode=None,
     offset=0,
     limit=1000,
+    deadline=None,
 ):
     from quasarr.providers.utils import (
         determine_search_category,
@@ -115,7 +108,15 @@ def get_search_results(
             error("TV search unavailable: Sonarr is not configured")
             return []
 
-    if imdb_id:
+    # Anchored before metadata warming: sources derive their own budget from this,
+    # so starting the clock after the warming would let a source outlive the
+    # deadline by however long the warming took.
+    start_time = time.time()
+
+    if imdb_id and (deadline is None or time.time() < deadline):
+        # A failed refresh is not cached, so every category of a multi-category
+        # request would otherwise pay the Arr client timeout again, past the
+        # ceiling the deadline exists to hold.
         get_imdb_metadata(shared_state, imdb_id, base_search_category)
 
     capability_category = get_search_capability_category(search_category)
@@ -142,8 +143,7 @@ def get_search_results(
             f"Using whitelist for category <g>{search_category}</g>: {', '.join([s.upper() for s in whitelisted_sources])}"
         )
 
-    start_time = time.time()
-    search_executor = SearchExecutor()
+    search_executor = SearchExecutor(deadline=deadline)
 
     # Config retrieval
     config = shared_state.values["config"]("Hostnames")
@@ -383,8 +383,16 @@ def get_search_results(
 
 
 class SearchExecutor:
-    def __init__(self):
+    def __init__(self, deadline=None):
         self.searches = []
+        # Absolute time this fan-out must be answered by. Callers that run several
+        # executors for one *arr request pass their own so the runs share a single
+        # deadline instead of each starting a fresh one.
+        self.deadline = (
+            deadline
+            if deadline is not None
+            else time.time() + SEARCH_FANOUT_DEADLINE_SECONDS
+        )
 
     def add(
         self,
@@ -421,13 +429,17 @@ class SearchExecutor:
         min_ttl = float("inf")
         bar_str = ""  # Initialize to prevent UnboundLocalError on full cache
 
-        # No context manager: `with` would call shutdown(wait=True) and block until
-        # every future finishes — defeating the response budget below. shutdown at the
-        # end uses wait=False so unfinished crawls continue and populate the cache.
-        executor = ThreadPoolExecutor(max_workers=max(len(self.searches), 1))
+        deadline = self.deadline
+        # One worker per source: the default pool is sized from the CPU count, so
+        # on a small host the last sources would queue behind the first ones and
+        # burn the deadline without ever having started.
+        # Not a context manager on purpose: its __exit__ joins every worker, which
+        # would re-introduce the very wait the deadline exists to prevent.
+        executor = ThreadPoolExecutor(max_workers=max(1, len(self.searches)))
         try:
             current_index = 0
             pending_futures = []
+            skipped_badges = []
 
             for key, func, use_cache, ttl, source_name in self.searches:
                 cached_result = None
@@ -449,11 +461,24 @@ class SearchExecutor:
                         min_ttl = ttl_left
                 else:
                     all_cached = False
+                    if time.time() >= deadline:
+                        # Nothing left to spend. Starting the work anyway would
+                        # only detach a worker whose result this response can no
+                        # longer use, and hit the source a second time for it.
+                        skipped_badges.append(
+                            f"<bg yellow><black>{source_name.upper()}</black></bg yellow>"
+                        )
+                        get_source_logger(source_name).warn(
+                            "Not started, this request is already out of time"
+                        )
+                        continue
 
                     # Single-flight: if another request is already crawling this exact
                     # (source, action, category) key, adopt its future instead of
                     # crawling everything a second time. Overlapping *arr retries used
-                    # to double the load on every slow feed.
+                    # to double the load on every slow feed — and the deadline above
+                    # makes those retries MORE likely, not less, because a source that
+                    # misses the deadline is absent from the response the client sees.
                     future = None
                     adopted = False
                     if use_cache:
@@ -479,62 +504,73 @@ class SearchExecutor:
                     pending_futures.append(future)
                     current_index += 1
 
+            results_badges = [""] * len(pending_futures)
             if pending_futures:
-                results_badges = [""] * len(pending_futures)
-                remaining = set(pending_futures)
-                budget = (
-                    SEARCH_RESPONSE_BUDGET_SECONDS
-                    if SEARCH_RESPONSE_BUDGET_SECONDS > 0
-                    else None
-                )
+                collected = set()
+
+                def collect(future):
+                    collected.add(future)
+                    index, cache_meta, source_name = future_to_meta[future]
+                    try:
+                        res = future.result()
+                        if res and len(res) > 0:
+                            badge = f"<bg green><black>{source_name.upper()}</black></bg green>"
+                        else:
+                            get_source_logger(source_name).debug(
+                                "❌ No results returned"
+                            )
+                            badge = f"<bg black><white>{source_name.upper()}</white></bg black>"
+
+                        results_badges[index] = badge
+                        results.extend(res)
+                        if cache_meta:
+                            cache_key, cache_ttl = cache_meta
+                            search_cache.set(cache_key, res, ttl=cache_ttl)
+                    except Exception as e:
+                        results_badges[index] = (
+                            f"<bg red><white>{source_name.upper()}</white></bg red>"
+                        )
+                        get_source_logger(source_name).warn(f"Search error: {e}")
 
                 try:
-                    for future in as_completed(pending_futures, timeout=budget):
-                        remaining.discard(future)
-                        index, cache_meta, source_name = future_to_meta[future]
-                        try:
-                            res = future.result()
-                            if res and len(res) > 0:
-                                badge = f"<bg green><black>{source_name.upper()}</black></bg green>"
-                            else:
-                                get_source_logger(source_name).debug(
-                                    "❌ No results returned"
-                                )
-                                badge = f"<bg black><white>{source_name.upper()}</white></bg black>"
+                    for future in as_completed(
+                        pending_futures, timeout=max(0.1, deadline - time.time())
+                    ):
+                        collect(future)
+                except FutureTimeoutError:
+                    # Radarr and Sonarr drop an indexer that outlives their own
+                    # request timeout, so answer with whatever is ready instead of
+                    # waiting for the straggler.
+                    for future in pending_futures:
+                        if future in collected:
+                            continue
+                        if future.done():
+                            collect(future)
+                            continue
 
-                            results_badges[index] = badge
-                            results.extend(res)
-                            if cache_meta:
-                                cache_key, cache_ttl = cache_meta
-                                search_cache.set(cache_key, res, ttl=cache_ttl)
-                        except Exception as e:
-                            results_badges[index] = (
-                                f"<bg red><white>{source_name.upper()}</white></bg red>"
-                            )
-                            get_source_logger(source_name).warn(f"Search error: {e}")
-                except FuturesTimeoutError:
-                    # Budget exhausted: return what finished. Stragglers keep crawling
-                    # in the background and cache their result for the next request —
-                    # a partial answer inside the client's 100s beats a full answer
-                    # the client never waits for.
-                    for future in remaining:
                         index, cache_meta, source_name = future_to_meta[future]
                         results_badges[index] = (
                             f"<bg yellow><black>{source_name.upper()}</black></bg yellow>"
                         )
-                        get_source_logger(source_name).info(
-                            f"Response budget of {SEARCH_RESPONSE_BUDGET_SECONDS}s "
-                            "exhausted — returning partial results, crawl continues "
-                            "in background"
+                        get_source_logger(source_name).warn(
+                            f"Dropped from this response after "
+                            f"{SEARCH_FANOUT_DEADLINE_SECONDS}s"
                         )
+                        # Dropped from THIS response, but not thrown away: the crawl
+                        # keeps running and writes its result to the cache, so the
+                        # next request serves it instantly. Without this a source
+                        # that is reliably slower than the deadline (AL: 66-73s vs
+                        # 60s) would never reach the client at all — it would be
+                        # dropped on every single request, forever.
                         if cache_meta:
                             future.add_done_callback(
                                 _make_late_cache_writer(cache_meta, source_name)
                             )
 
-                bar_str = f" [{' '.join(results_badges)}]"
+            if results_badges or skipped_badges:
+                bar_str = f" [{' '.join(results_badges + skipped_badges)}]"
         finally:
-            executor.shutdown(wait=False)
+            executor.shutdown(wait=False, cancel_futures=True)
 
         return results, bar_str, all_cached, min_ttl
 
