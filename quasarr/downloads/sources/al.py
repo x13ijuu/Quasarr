@@ -1167,6 +1167,26 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
     return title, release_id
 
 
+def notes_title_identifies_episode(notes_title, episode) -> bool:
+    """True when a release-notes title names the episode that was requested.
+
+    AL's notes sometimes carry a COLLECTION name instead of a per-episode one,
+    e.g. "One.Piece.E001-206.GerSub.480p…207-1100…E1101-XXX…". Passing that
+    through verbatim gives Sonarr nothing to map — it answered "Unknown Series"
+    and rejected the release (live 2026-08-20, after the episode-link fix had
+    already made the release show up again).
+
+    Nothing requested -> the notes title is fine as-is (season packs, feeds).
+    """
+    if not episode:
+        return True
+    try:
+        wanted = int(episode)
+    except (TypeError, ValueError):
+        return True
+    return _extract_episode(notes_title or "") == wanted
+
+
 def _extract_episode(title: str) -> int | None:
     match = re.search(r"\bS\d{1,4}E(\d+)\b(?![\-E\d])", title)
     if match:

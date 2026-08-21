@@ -20,6 +20,7 @@ from quasarr.downloads.sources.al import (
     _parse_info_from_download_item,
     _parse_info_from_feed_entry,
     apply_arc_season,
+    notes_title_identifies_episode,
 )
 from quasarr.providers import shared_state
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
@@ -457,8 +458,16 @@ class Source(AbstractSearchSource):
                         )
                         continue
 
-                    # If no valid title was grabbed from Release Notes, guess the title
-                    if release_info.release_title:
+                    # Release-Notes-Titel nur uebernehmen, wenn er die ANGEFRAGTE
+                    # Episode auch benennt. AL fuehrt Sammel-Tabs unter einem
+                    # Kollektionsnamen ("One.Piece.E001-206…207-1100…E1101-XXX…");
+                    # der wurde bisher verbatim durchgereicht und Sonarr antwortete
+                    # "Unknown Series" — das Release war da, aber unbrauchbar.
+                    # Der synthetisierte Titel traegt die Anfrage-Nummerierung
+                    # ("One.Piece.E1174.…") und parst per Konstruktion.
+                    if release_info.release_title and notes_title_identifies_episode(
+                        release_info.release_title, episode
+                    ):
                         release_title = release_info.release_title
                         title_source = "release_notes"
                     else:
