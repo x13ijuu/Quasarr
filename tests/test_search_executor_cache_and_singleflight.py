@@ -1,24 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-Tests for the executor-level stability fixes (Maja fork, maja.23).
+Tests for the executor behaviour this fork adds ON TOP of upstream's fan-out
+deadline (v4.6.17, ``SEARCH_FANOUT_DEADLINE_SECONDS``).
 
-Background: Sonarr/Radarr abort HTTP requests after a hard, non-configurable
-100s. Measured on the live host, 24% of Quasarr responses exceeded that —
-every miss raises the *arr backoff escalation ("indexer down"), the client
-retries, and without single-flight the retry doubled the crawl load (one
-observed crawl kept running for 53 minutes after the client had hung up).
+Upstream now owns the timing itself — dropping a slow source from the response,
+skipping a source whose deadline is already spent, and sizing the pool to one
+worker per source. Those cases live in ``test_search_fanout_deadline.py`` and
+were removed here when the fork rebased onto v4.6.17.
 
-The fixes under test:
-  (1) run_all returns PARTIAL results once SEARCH_RESPONSE_BUDGET_SECONDS is
-      spent — a partial answer inside the client's limit beats a complete
-      answer the client never waits for. Stragglers keep crawling and cache
-      their result for the next request.
+What upstream does NOT do, and this file covers:
+  (1) A source dropped from the response keeps crawling and writes its result
+      to the CACHE, so the next request serves it instantly. Without this a
+      source that is reliably slower than the deadline (AL needs 79-90s for One
+      Piece / Bleach) would be dropped on every request forever and never reach
+      the client at all.
   (2) Single-flight: a second request for the same (source, action, category)
-      adopts the in-flight crawl instead of duplicating it.
+      adopts the in-flight crawl instead of duplicating it. The deadline makes
+      *arr retries MORE likely, so this matters more after the rebase, not less
+      (one observed crawl kept running 53 minutes after the client hung up).
   (3) The feed cache TTL honours FEED_CACHE_TTL (default 600s) instead of a
       hardcoded 60s that was shorter than one slow category pass.
-  (4) The executor sizes itself to the number of sources (default pool of 12
-      left 4 of 16 sources queued for no reason).
 """
 import threading
 import time
@@ -55,45 +56,10 @@ def _add(executor, initials, impl, category=2000, use_cache=True):
     )
 
 
-class ResponseBudgetTests(unittest.TestCase):
+class LateCacheWriterTests(unittest.TestCase):
     def setUp(self):
         search_cache.cache.clear()
         _inflight_futures.clear()
-
-    def test_partial_results_within_budget(self):
-        release_gate = threading.Event()
-
-        def fast(*_a, **_k):
-            return _release("fast")
-
-        def slow(*_a, **_k):
-            release_gate.wait(10)
-            return _release("slow")
-
-        ex = SearchExecutor()
-        _add(ex, "fa", fast, category=2000)
-        # Deliberately NOT (sl / 5000): that key belongs to
-        # test_straggler_populates_cache_for_next_request. This test's straggler
-        # finishes on a worker thread after the test returns and writes to the
-        # cache; sharing the key let that write land after the next setUp() had
-        # cleared it, so the next test read "slow" instead of "late". Measured
-        # 6 of 20 runs before the split.
-        _add(ex, "wx", slow, category=5070)
-
-        with patch.object(search_module, "SEARCH_RESPONSE_BUDGET_SECONDS", 1):
-            started = time.time()
-            results, badges, all_cached, _ = ex.run_all()
-            elapsed = time.time() - started
-
-        try:
-            self.assertLess(elapsed, 5, "must return at the budget, not at the straggler")
-            titles = [r["details"]["title"] for r in results]
-            self.assertEqual(["fast"], titles, "partial results: fast source only")
-            self.assertIn("FA", badges)
-            self.assertIn("WX", badges, "straggler must still appear in the status bar")
-            self.assertFalse(all_cached)
-        finally:
-            release_gate.set()
 
     def test_straggler_populates_cache_for_next_request(self):
         release_gate = threading.Event()
@@ -102,18 +68,17 @@ class ResponseBudgetTests(unittest.TestCase):
             release_gate.wait(10)
             return _release("late")
 
-        ex = SearchExecutor()
+        ex = SearchExecutor(deadline=time.time() + 1)
         _add(ex, "sl", slow, category=5000)
-        with patch.object(search_module, "SEARCH_RESPONSE_BUDGET_SECONDS", 1):
-            results, _, _, _ = ex.run_all()
-        self.assertEqual([], results, "nothing finished inside the budget")
+        results, _, _, _ = ex.run_all()
+        self.assertEqual([], results, "nothing finished inside the deadline")
 
         release_gate.set()
         # The late-cache done_callback fires from the worker thread.
         deadline = time.time() + 5
         while time.time() < deadline:
             ex2 = SearchExecutor()
-            _add(ex2, "sl", lambda *_a, **_k: _release("relcrawl"), category=5000)
+            _add(ex2, "sl", lambda *_a, **_k: _release("recrawl"), category=5000)
             results2, _, all_cached2, _ = ex2.run_all()
             if all_cached2:
                 break
@@ -124,17 +89,6 @@ class ResponseBudgetTests(unittest.TestCase):
             results2[0]["details"]["title"],
             "cache holds the straggler's result, no re-crawl happened",
         )
-
-    def test_zero_budget_disables_deadline(self):
-        def slowish(*_a, **_k):
-            time.sleep(0.3)
-            return _release("done")
-
-        ex = SearchExecutor()
-        _add(ex, "sl", slowish, category=5000)
-        with patch.object(search_module, "SEARCH_RESPONSE_BUDGET_SECONDS", 0):
-            results, _, _, _ = ex.run_all()
-        self.assertEqual(1, len(results))
 
 
 class SingleFlightTests(unittest.TestCase):
@@ -243,23 +197,6 @@ class FeedCacheTtlTests(unittest.TestCase):
         with patch("quasarr.search.time.time", return_value=time.time() + 601):
             val, _ = search_cache.get("k")
         self.assertIsNone(val, "miss after expiry")
-
-
-class ExecutorSizingTests(unittest.TestCase):
-    def test_all_sources_run_concurrently(self):
-        # 16 sources, each blocking until ALL 16 have started: only possible if
-        # the pool holds at least one thread per source (default pool = 12).
-        barrier = threading.Barrier(16, timeout=5)
-
-        def crawl(*_a, **_k):
-            barrier.wait()
-            return _release("x")
-
-        ex = SearchExecutor()
-        for i in range(16):
-            _add(ex, f"s{i:02d}", crawl, category=2000 + i, use_cache=False)
-        results, _, _, _ = ex.run_all()
-        self.assertEqual(16, len(results))
 
 
 if __name__ == "__main__":

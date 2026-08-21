@@ -2,6 +2,7 @@
 # Quasarr
 # Project by https://github.com/rix1337
 
+import os
 import re
 import sys
 
@@ -118,6 +119,17 @@ DOWNLOAD_REQUEST_TIMEOUT_SECONDS = int(
 SESSION_REQUEST_TIMEOUT_SECONDS = int(
     TIMEOUT_SLOW_MODE_DEFINITIONS["session"]["base_seconds"]
 )
+
+# Ceiling for one *arr-facing search or feed response. Radarr and Sonarr disable
+# an indexer that outlives their own request timeout (100s by default), so the
+# fan-out stops waiting for a slow source well before that. Deliberately not part
+# of slow mode: the *arr timeout does not grow with it.
+# Upstream default is 60s. Overridable because this fork's slowest source is
+# measurably slower than that: AL needs 79-90s for the big long-runners (One
+# Piece, Bleach), so a hard 60 would drop it from every interactive search.
+# Deployment sets 95 - still under the 100s after which Sonarr/Radarr drop an
+# indexer outright.
+SEARCH_FANOUT_DEADLINE_SECONDS = int(os.environ.get("SEARCH_FANOUT_DEADLINE", "60"))
 
 # Notification providers exposed in config/UI.
 NOTIFICATION_PROVIDERS = ("discord", "telegram")
