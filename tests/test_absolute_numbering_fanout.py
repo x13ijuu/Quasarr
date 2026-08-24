@@ -126,7 +126,7 @@ class AbsoluteNumberingFanoutTests(unittest.TestCase):
                 "search_string": "tt0388629",
                 "season": 22,
                 "episode": 35,
-                "accepted_pairs": [(22, 35)],
+                "accepted_pairs": ((22, 35),),
             },
             kwargs["sf"],
             "season-only source gets the translated pair",
@@ -172,9 +172,14 @@ class AbsoluteNumberingFanoutTests(unittest.TestCase):
         self.assertEqual(4, kwargs["sf"]["season"], "best candidate drives the query")
         self.assertEqual(17, kwargs["sf"]["episode"])
         self.assertEqual(
-            candidates,
+            tuple(candidates),
             kwargs["sf"]["accepted_pairs"],
             "every candidate stays acceptable for a locally filtering source",
+        )
+        self.assertIsInstance(
+            kwargs["sf"]["accepted_pairs"],
+            tuple,
+            "kwargs land im Cache-Schluessel und muessen hashbar sein",
         )
         self.assertEqual(
             None,
@@ -187,6 +192,40 @@ class AbsoluteNumberingFanoutTests(unittest.TestCase):
             kwargs["al"],
             "al does not advertise supports_candidate_pairs in this fixture",
         )
+
+    def test_candidate_kwargs_survive_the_cache_key(self):
+        """Regression (live 2026-08-24): accepted_pairs kam als Liste an.
+
+        Der Cache-Schluessel ist ``frozenset(kwargs.items())`` — eine Liste darin
+        wirft TypeError im Executor, und eine Suche, die wirft, liefert Sonarr
+        NULL Releases. Das sieht aus wie "die Quelle hat nichts" und ist damit
+        genau die stille Falschheit, gegen die dieser Fork gebaut wurde. Betroffen
+        war jede absolut nummerierte Anime-Suche, auch One Piece.
+        """
+        from quasarr.search import SearchExecutor, _hashable
+
+        candidates = [(4, 17), (3, 17)]
+        self._run(lambda *_a, **_k: list(candidates), episode=17)
+        self.assertIsInstance(
+            _kwargs_by_source()["sf"]["accepted_pairs"],
+            tuple,
+            "der Fan-out muss hashbare kwargs bauen",
+        )
+
+        # Der ECHTE Executor, nicht die Attrappe: genau hier flog live der
+        # TypeError. Ein list-wertiger kwarg darf ihn nicht mehr umwerfen.
+        source = SimpleNamespace(initials="sf")
+        executor = SearchExecutor()
+        executor.add(
+            source,
+            (None, 0.0, 5000),
+            {"search_string": "tt9054364", "accepted_pairs": [(4, 17), (3, 17)]},
+        )
+        self.assertEqual(1, len(executor.searches))
+
+        for value in ([1, 2], {"a": [1]}, {1, 2}, (1, [2])):
+            with self.subTest(value=value):
+                hash(_hashable(value))
 
     def test_ordinary_season_episode_search_is_untouched(self):
         _results, resolve_mock = self._run(
