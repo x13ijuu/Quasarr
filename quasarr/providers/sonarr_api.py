@@ -280,8 +280,13 @@ def translate_scene_numbering(season, episode, season_episodes, all_episodes):
         if candidate.get("episodeNumber") == episode:
             return None  # requested pair exists as-is — nothing to translate
 
-    for candidate in all_episodes or []:
-        if candidate.get("absoluteEpisodeNumber") == episode:
+    # Scene first, TVDB second — same reasoning as resolve_absolute_candidates:
+    # Sonarr numbers its request in scene terms whenever TheXEM has a mapping,
+    # so the scene field is what the incoming number actually speaks.
+    for field in ("sceneAbsoluteEpisodeNumber", "absoluteEpisodeNumber"):
+        for candidate in all_episodes or []:
+            if candidate.get(field) != episode:
+                continue
             target_season = candidate.get("seasonNumber")
             target_episode = candidate.get("episodeNumber")
             if target_season is None or target_episode is None:
@@ -340,6 +345,96 @@ def resolve_scene_numbering(shared_state, imdb_id, season, episode):
         return None
 
 
+def _episode_pair(candidate):
+    """Return ``(season, episode)`` of a Sonarr episode record, or ``None``."""
+    season = candidate.get("seasonNumber")
+    episode = candidate.get("episodeNumber")
+    if season is None or episode is None:
+        return None
+    return season, episode
+
+
+def resolve_absolute_candidates(shared_state, imdb_id, absolute_episode):
+    """Every (season, episode) pair an absolute-numbered request can mean.
+
+    Maja fork: Sonarr sends the **scene** absolute number, not the TVDB one.
+    For shows whose TheXEM mapping restarts absolute numbering per season, that
+    number is ambiguous — Slime S01E17..S04E17 all carry
+    ``sceneAbsoluteEpisodeNumber == 17`` while their ``absoluteEpisodeNumber``
+    is 17/41/65/89. Matching only the TVDB field (the pre-maja.31 behaviour)
+    always resolved such a request to season 1, so every source was asked for
+    the wrong season and correct hits were dropped as season mismatches.
+
+    Scene hits win whenever there are any: Sonarr uses scene numbering as soon
+    as a TheXEM mapping exists. Without them the TVDB absolute is the truth,
+    which keeps genuinely absolute-numbered shows (One Piece) unchanged.
+
+    Ordering matters — the caller hands the FIRST pair to sources that bake
+    season/episode into their query and cannot take a set. Episodes Sonarr is
+    still missing come first, then the newest season, because a resetting scene
+    number is nearly always chasing a recent episode. Sonarr's cutoff-unmet
+    list would be the sharper signal but costs a paged walk per search; the
+    candidate set makes that precision unnecessary for set-aware sources.
+
+    Fail-open: any missing client/series/episode data returns ``[]`` and the
+    caller then behaves exactly as before.
+    """
+    if not imdb_id or absolute_episode is None:
+        return []
+
+    try:
+        absolute_episode = int(absolute_episode)
+    except (TypeError, ValueError):
+        return []
+
+    client = get_client(shared_state)
+    if client is None:
+        return []
+
+    try:
+        wanted_imdb = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
+        series_id = None
+        for series in client.series_list():
+            if series.get("imdbId") == wanted_imdb:
+                series_id = series.get("id")
+                break
+        if series_id is None:
+            return []
+
+        scene_hits = []
+        absolute_hits = []
+        for candidate in client.episodes(series_id) or []:
+            pair = _episode_pair(candidate)
+            if pair is None:
+                continue
+            if candidate.get("sceneAbsoluteEpisodeNumber") == absolute_episode:
+                scene_hits.append((candidate, pair))
+            elif candidate.get("absoluteEpisodeNumber") == absolute_episode:
+                absolute_hits.append((candidate, pair))
+
+        hits = scene_hits or absolute_hits
+        if not hits:
+            return []
+
+        # Specials and unmonitored seasons are never what an absolute request
+        # means — but only drop them while something else survives.
+        real = [(c, p) for c, p in hits if p[0] > 0 and c.get("monitored")]
+        hits = real or hits
+
+        hits.sort(key=lambda item: (bool(item[0].get("hasFile")), -item[1][0]))
+        candidates = [pair for _, pair in hits]
+
+        trace(
+            f"absolute numbering resolved for {wanted_imdb}: E{absolute_episode} -> "
+            + ", ".join(f"S{s}E{e}" for s, e in candidates)
+            + (" (scene)" if scene_hits else " (tvdb)")
+        )
+        return candidates
+    except Exception as e:
+        trace(f"absolute numbering resolution failed for {imdb_id}: {e}")
+        return []
+
+
 def resolve_absolute_numbering(shared_state, imdb_id, absolute_episode):
     """Translate an absolute episode number into (season, episode) via Sonarr.
 
@@ -354,48 +449,15 @@ def resolve_absolute_numbering(shared_state, imdb_id, absolute_episode):
     Translating once per search lets those sources answer with the season/episode
     pair they organise by, without changing what AL/AT receive.
 
+    Since maja.31 this is the single-answer view of
+    :func:`resolve_absolute_candidates` — an ambiguous scene number yields the
+    best candidate rather than whatever episode happened to come first.
+
     Fail-open: any missing client/series/episode data returns None, and the
     caller then behaves exactly as before.
 
     Returns:
         (season, episode) tuple, else None.
     """
-    if not imdb_id or absolute_episode is None:
-        return None
-
-    try:
-        absolute_episode = int(absolute_episode)
-    except (TypeError, ValueError):
-        return None
-
-    client = get_client(shared_state)
-    if client is None:
-        return None
-
-    try:
-        wanted_imdb = imdb_id if imdb_id.startswith("tt") else f"tt{imdb_id}"
-        series_id = None
-        for series in client.series_list():
-            if series.get("imdbId") == wanted_imdb:
-                series_id = series.get("id")
-                break
-        if series_id is None:
-            return None
-
-        for candidate in client.episodes(series_id) or []:
-            if candidate.get("absoluteEpisodeNumber") != absolute_episode:
-                continue
-            target_season = candidate.get("seasonNumber")
-            target_episode = candidate.get("episodeNumber")
-            if target_season is None or target_episode is None:
-                return None
-            trace(
-                f"absolute numbering resolved for {wanted_imdb}: "
-                f"E{absolute_episode} -> S{target_season}E{target_episode}"
-            )
-            return target_season, target_episode
-
-        return None
-    except Exception as e:
-        trace(f"absolute numbering resolution failed for {imdb_id}: {e}")
-        return None
+    candidates = resolve_absolute_candidates(shared_state, imdb_id, absolute_episode)
+    return candidates[0] if candidates else None

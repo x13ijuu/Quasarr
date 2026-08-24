@@ -16,6 +16,11 @@ The translation must:
   (3) cost ONE Sonarr call per search, not one per source,
   (4) fail open — an unresolvable number behaves exactly as before,
   (5) never touch ordinary season/episode searches.
+
+maja.31: the resolution is a LIST. Sonarr sends TheXEM's scene absolute number,
+which restarts per season on many anime — "Slime E17" is S01E17 through S04E17.
+Sources that filter locally get every candidate; sources that bake season and
+episode into their query get the best one.
 """
 import unittest
 from types import SimpleNamespace
@@ -49,6 +54,7 @@ def _sources_and_state():
         supports_imdb=True,
         supports_absolute_numbering=True,
         supports_date_numbering=False,
+        supports_candidate_pairs=False,
         supported_categories=[SEARCH_CAT_SHOWS],
     )
     season_source = SimpleNamespace(
@@ -56,6 +62,7 @@ def _sources_and_state():
         supports_imdb=True,
         supports_absolute_numbering=False,
         supports_date_numbering=False,
+        supports_candidate_pairs=True,
         supported_categories=[SEARCH_CAT_SHOWS],
     )
     shared_state = SimpleNamespace(
@@ -89,7 +96,7 @@ class AbsoluteNumberingFanoutTests(unittest.TestCase):
             patch("quasarr.search.get_search_category_sources", return_value=[]),
             patch("quasarr.search.SearchExecutor", FakeSearchExecutor),
             patch(
-                "quasarr.providers.sonarr_api.resolve_absolute_numbering",
+                "quasarr.providers.sonarr_api.resolve_absolute_candidates",
                 side_effect=resolver,
             ) as resolve_mock,
             patch("quasarr.providers.sonarr_api.resolve_scene_numbering",
@@ -106,7 +113,7 @@ class AbsoluteNumberingFanoutTests(unittest.TestCase):
         return results, resolve_mock
 
     def test_resolvable_absolute_reaches_season_only_source_translated(self):
-        _results, resolve_mock = self._run(lambda *_a, **_k: (22, 35), episode=1120)
+        _results, resolve_mock = self._run(lambda *_a, **_k: [(22, 35)], episode=1120)
 
         self.assertEqual(
             {"al", "sf"},
@@ -115,7 +122,12 @@ class AbsoluteNumberingFanoutTests(unittest.TestCase):
         )
         kwargs = _kwargs_by_source()
         self.assertEqual(
-            {"search_string": "tt0388629", "season": 22, "episode": 35},
+            {
+                "search_string": "tt0388629",
+                "season": 22,
+                "episode": 35,
+                "accepted_pairs": [(22, 35)],
+            },
             kwargs["sf"],
             "season-only source gets the translated pair",
         )
@@ -131,7 +143,7 @@ class AbsoluteNumberingFanoutTests(unittest.TestCase):
         )
 
     def test_unresolvable_absolute_keeps_todays_behaviour(self):
-        _results, resolve_mock = self._run(lambda *_a, **_k: None, episode=1120)
+        _results, resolve_mock = self._run(lambda *_a, **_k: [], episode=1120)
 
         self.assertEqual(
             ["al"],
@@ -144,9 +156,41 @@ class AbsoluteNumberingFanoutTests(unittest.TestCase):
         )
         self.assertEqual(1, resolve_mock.call_count)
 
+    def test_ambiguous_scene_absolute_hands_every_candidate_to_local_filters(self):
+        """Slime: scene absolute 17 means S01E17..S04E17.
+
+        The best candidate (newest season with something still wanted) drives
+        the query, but a source that filters locally must be allowed to accept
+        any of them — otherwise season 1 wins again, just one layer down.
+        """
+        candidates = [(4, 17), (3, 17), (2, 17), (1, 17)]
+        _results, _resolve_mock = self._run(
+            lambda *_a, **_k: list(candidates), episode=17
+        )
+
+        kwargs = _kwargs_by_source()
+        self.assertEqual(4, kwargs["sf"]["season"], "best candidate drives the query")
+        self.assertEqual(17, kwargs["sf"]["episode"])
+        self.assertEqual(
+            candidates,
+            kwargs["sf"]["accepted_pairs"],
+            "every candidate stays acceptable for a locally filtering source",
+        )
+        self.assertEqual(
+            None,
+            kwargs["al"]["season"],
+            "absolute-capable source keeps the absolute form",
+        )
+        self.assertEqual(17, kwargs["al"]["episode"])
+        self.assertNotIn(
+            "accepted_pairs",
+            kwargs["al"],
+            "al does not advertise supports_candidate_pairs in this fixture",
+        )
+
     def test_ordinary_season_episode_search_is_untouched(self):
         _results, resolve_mock = self._run(
-            lambda *_a, **_k: (99, 99), season=2, episode=3
+            lambda *_a, **_k: [(99, 99)], season=2, episode=3
         )
 
         self.assertEqual({"al", "sf"}, set(FakeSearchExecutor.latest.searches))
