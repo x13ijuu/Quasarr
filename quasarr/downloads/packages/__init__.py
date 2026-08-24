@@ -154,6 +154,9 @@ def get_links_status(package, all_links, is_archive=False):
         - offline_mirror_linkids: list - offline link UUIDs to clean up (online mirror exists)
         - not_downloadable_linkids: list - "not downloadable" link UUIDs to remove by id (online mirror exists)
         - file_error_linkids: list - file-error (statusIconKey "false") link UUIDs to remove by id (online mirror exists)
+        - filenames: list - Maja fork: the REAL names JDownloader reports for the
+          links. The only place the delivered content is visible; the refusal
+          ledger compares them against what the release title claimed.
     """
     package_uuid = package.get("uuid")
     package_name = package.get("name", "unknown")
@@ -351,6 +354,9 @@ def get_links_status(package, all_links, is_archive=False):
         "offline_mirror_linkids": offline_mirror_linkids,
         "not_downloadable_linkids": not_downloadable_linkids,
         "file_error_linkids": file_error_linkids,
+        "filenames": [
+            link.get("name") for link in links_in_package if link.get("name")
+        ],
     }
 
 
@@ -591,6 +597,47 @@ def get_packages(shared_state, _cache=None, auto_start=True):
 
             error = link_details["error"]
             finished = link_details["all_finished"]
+
+            # Maja fork: the one moment where claim and reality are both in
+            # scope. `package_name` is the title we handed Sonarr (download()
+            # sets packageName = title), `filenames` is what JDownloader
+            # actually pulled. If the files disprove the title's audio claim,
+            # the release is refused for good — that is the only thing that
+            # breaks the grab/import/discard/regrab circle, because Sonarr sees
+            # each pass as a success and will happily repeat it forever
+            # (measured: Slime S04E19, 93 grabs in 14 days).
+            if finished and not error:
+                try:
+                    from quasarr.identity import refusals
+
+                    contradiction = refusals.language_contradiction(
+                        package_name, link_details.get("filenames")
+                    )
+                    if contradiction:
+                        claimed, delivered = contradiction
+                        grab = refusals.recall_grab(comment)
+                        if grab:
+                            refusals.record_refusal(
+                                grab.get("source_key"),
+                                grab.get("url"),
+                                package_name,
+                                claimed,
+                                delivered,
+                                package_id=comment,
+                            )
+                        else:
+                            # Without the note we cannot name the release, and a
+                            # refusal we cannot name is one we could never lift.
+                            # Log it and let it go.
+                            debug(
+                                f"'{package_name}' claimed "
+                                f"{'/'.join(sorted(claimed))} but delivered "
+                                f"{'/'.join(sorted(delivered))} — no grab note "
+                                f"for {comment}, not refusing"
+                            )
+                except Exception as e:
+                    # Never let bookkeeping break a finished download.
+                    debug(f"Refusal check failed for '{package_name}': {e}")
 
             # Links can go offline, flip to "Not downloadable!", or hit a file
             # error after auto-start, while they sit in the downloader list. The
