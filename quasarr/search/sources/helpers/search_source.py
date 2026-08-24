@@ -35,6 +35,18 @@ class AbstractSearchSource(ABC):
         return False
 
     @property
+    def supports_candidate_pairs(self) -> bool:
+        """The source accepts an ``accepted_pairs`` list of (season, episode).
+
+        Maja fork: TheXEM's scene absolute numbering restarts per season on many
+        anime, so one absolute number can mean several seasons. Sources that
+        fetch a whole series and filter locally can weigh every candidate at no
+        extra request; sources that bake season/episode into their query cannot
+        and keep receiving the single best pair.
+        """
+        return False
+
+    @property
     @abstractmethod
     def supported_categories(self) -> list[int]:
         pass

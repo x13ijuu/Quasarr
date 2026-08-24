@@ -50,6 +50,7 @@ class Source(AbstractSearchSource):
     supports_phrase = False
     supports_date_numbering = False
     supports_absolute_numbering = True
+    supports_candidate_pairs = True
     supported_categories = [SEARCH_CAT_MOVIES, SEARCH_CAT_SHOWS, SEARCH_CAT_SHOWS_ANIME]
     requires_login = True
 
@@ -201,6 +202,7 @@ class Source(AbstractSearchSource):
         search_string: str = "",
         season: int = None,
         episode: int = None,
+        accepted_pairs=None,
     ) -> list[SearchRelease]:
         releases = []
 
@@ -243,6 +245,20 @@ class Source(AbstractSearchSource):
             season_title = f"{search_string} Staffel {requested_season}"
             xem_name = get_season_name(search_string, requested_season)
 
+        # Maja fork (maja.31): an absolute-numbered request carries no season, so
+        # the ladder below had nothing season-specific to try and fell straight
+        # through to the plain title - which is the show's MAIN page, i.e. season
+        # 1. That is why "Slime E17" answered with nine season-1 releases.
+        # Sonarr's scene absolute number resolves to one or more (season,
+        # episode) candidates; try their season pages first. A show that really
+        # is absolute-numbered (One Piece) has no "Staffel 21" page, so those
+        # variants miss and the plain title still wins - unchanged behaviour.
+        candidate_seasons = []
+        if requested_season is None and accepted_pairs:
+            for pair_season, _pair_episode in accepted_pairs:
+                if pair_season and pair_season > 0 and pair_season not in candidate_seasons:
+                    candidate_seasons.append(pair_season)
+
         results = []
         # Maja fork (arc-numbering): remember whether the winning search variant
         # was season-specific (Sonarr's "Staffel N" or the TheXEM arc name). Arc
@@ -250,17 +266,25 @@ class Source(AbstractSearchSource):
         # in the AL title; only a season-specific match lets us safely stamp the
         # requested season back onto them (see _apply_arc_season).
         season_specific_match = False
-        for variant in [
-            season_title,
-            xem_name,
-            search_string,
-        ]:
+        matched_season = None
+
+        variant_plan = [(season_title, requested_season), (xem_name, requested_season)]
+        for candidate_season in candidate_seasons:
+            variant_plan.append(
+                (f"{search_string} Staffel {candidate_season}", candidate_season)
+            )
+            variant_plan.append(
+                (get_season_name(search_string, candidate_season), candidate_season)
+            )
+        variant_plan.append((search_string, None))
+
+        for variant, variant_season in variant_plan:
             if results:
                 break
             if variant is None:
                 continue
 
-            variant_is_season_specific = variant in (season_title, xem_name)
+            variant_is_season_specific = variant_season is not None
             encoded_search_string = quote_plus(variant)
             year = None
             if imdb_id is not None and variant == search_string:
@@ -305,6 +329,7 @@ class Source(AbstractSearchSource):
 
                 results.append({"url": absolute_redirect_url, "title": page_title})
                 season_specific_match = variant_is_season_specific
+                matched_season = variant_season
                 continue
 
             soup = BeautifulSoup(r.text, "html.parser")
@@ -342,6 +367,13 @@ class Source(AbstractSearchSource):
 
                 results.append({"url": url, "title": name})
                 season_specific_match = variant_is_season_specific
+                matched_season = variant_season
+
+        # A candidate season page answered, so the request IS season-specific
+        # from here on: the arc stamp and the mismatch gate below need a season
+        # to compare against, and this one is evidence, not a guess.
+        if requested_season is None and matched_season is not None:
+            requested_season = matched_season
 
         for result in results:
             try:

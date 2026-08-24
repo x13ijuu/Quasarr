@@ -1048,7 +1048,32 @@ def normalize_optional_int(value):
         return None
 
 
-def match_in_title(title: str, season: int = None, episode: int = None) -> bool:
+def match_in_title(
+    title: str,
+    season: int = None,
+    episode: int = None,
+    accepted_pairs=None,
+) -> bool:
+    """True when ``title`` carries the requested season/episode.
+
+    Maja fork: ``accepted_pairs`` is an optional list of ``(season, episode)``
+    tuples that are ALSO acceptable. It exists because Sonarr sends TheXEM's
+    scene absolute number, which restarts per season on many anime — one number
+    can legitimately mean several seasons, and pinning the first one made
+    season 1 the answer to every such request. A title matching any candidate is
+    a hit; Sonarr's own matcher then decides which release it actually wants.
+    """
+    if accepted_pairs:
+        return any(
+            _match_single_pair_in_title(title, pair_season, pair_episode)
+            for pair_season, pair_episode in accepted_pairs
+        )
+    return _match_single_pair_in_title(title, season, episode)
+
+
+def _match_single_pair_in_title(
+    title: str, season: int = None, episode: int = None
+) -> bool:
     season = normalize_optional_int(season)
     episode = normalize_optional_int(episode)
 
@@ -1280,6 +1305,7 @@ def is_valid_release(
     season: int = None,
     episode: int = None,
     episode_date: date = None,
+    accepted_pairs=None,
 ) -> bool:
     """
     Return True if the given release title is valid for the given search parameters.
@@ -1289,6 +1315,9 @@ def is_valid_release(
     - season: desired season number (or None)
     - episode: desired episode number (or None)
     - episode_date: validated date for a date-numbered TV episode (or None)
+    - accepted_pairs: Maja fork — further (season, episode) pairs that are also
+      acceptable, because Sonarr's scene absolute number can mean several
+      seasons at once (see match_in_title)
     """
     try:
         is_movie_search = search_category // 1000 * 1000 == SEARCH_CAT_MOVIES
@@ -1347,14 +1376,17 @@ def is_valid_release(
                 )
                 return False
             # if caller specified a season or episode, double‑check the match
-            if season is not None or episode is not None:
-                if not match_in_title(title, season, episode):
+            if season is not None or episode is not None or accepted_pairs:
+                if not match_in_title(
+                    title, season, episode, accepted_pairs=accepted_pairs
+                ):
                     trace(
                         "Skipping {title!r} as it doesn't match season "
-                        "{season} and episode {episode}",
+                        "{season} and episode {episode} (candidates: {pairs})",
                         title=title,
                         season=season,
                         episode=episode,
+                        pairs=accepted_pairs,
                     )
                     return False
             return True

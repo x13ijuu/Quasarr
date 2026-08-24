@@ -39,6 +39,7 @@ class Source(AbstractSearchSource):
     supports_imdb = True
     supports_phrase = False
     supports_date_numbering = False
+    supports_candidate_pairs = True
     supported_categories = [SEARCH_CAT_SHOWS, SEARCH_CAT_SHOWS_ANIME]
 
     def feed(
@@ -157,6 +158,7 @@ class Source(AbstractSearchSource):
         search_string: str = "",
         season: int = None,
         episode: int = None,
+        accepted_pairs=None,
     ) -> list[SearchRelease]:
         cf_session = LazyFlareSolverrSession(shared_state)
         try:
@@ -168,6 +170,7 @@ class Source(AbstractSearchSource):
                 season,
                 episode,
                 cf_session,
+                accepted_pairs=accepted_pairs,
             )
         finally:
             cf_session.close()
@@ -181,6 +184,7 @@ class Source(AbstractSearchSource):
         season,
         episode,
         cf_session,
+        accepted_pairs=None,
     ):
         releases = []
         sf = shared_state.values["config"]("Hostnames").get(self.initials)
@@ -398,7 +402,12 @@ class Source(AbstractSearchSource):
 
                     # check down here on purpose, because the title may be modified at episode stage
                     if not is_valid_release(
-                        title, search_category, search_string, season, episode
+                        title,
+                        search_category,
+                        search_string,
+                        season,
+                        episode,
+                        accepted_pairs=accepted_pairs,
                     ):
                         continue
 

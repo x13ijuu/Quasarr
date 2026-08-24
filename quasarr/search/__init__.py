@@ -56,6 +56,7 @@ def get_search_results(
         get_search_behavior_category,
         get_search_cache_owner_category,
         get_search_capability_category,
+        normalize_optional_int,
         parse_episode_date,
         release_matches_search_category,
     )
@@ -76,7 +77,14 @@ def get_search_results(
     # exist, and the DDL sites — which organise by TVDB seasons ("Staffel 7") —
     # return nothing. Translate back via Sonarr's own episode data; no-op for
     # valid pairs and absolute-only searches, fail-open when Sonarr is unset.
-    if imdb_id and season is not None and episode is not None:
+    # bottle hands absent query parameters through as "" rather than None, so a
+    # bare `is not None` fired this on EVERY tv search and spent a Sonarr round
+    # trip on a request that could not translate anything.
+    if (
+        imdb_id
+        and normalize_optional_int(season) is not None
+        and normalize_optional_int(episode) is not None
+    ):
         from quasarr.providers.sonarr_api import resolve_scene_numbering
 
         translated = resolve_scene_numbering(shared_state, imdb_id, season, episode)
@@ -168,14 +176,20 @@ def get_search_results(
             # only answerable by AL/AT, so every other source was dropped below.
             # The German sources that actually carry the content never got asked
             # — SF returns more German-audio hits than AL on the same episode.
-            # Resolve the pair ONCE here and hand it to those sources; AL/AT keep
-            # receiving the absolute form they expect. Fail-open: None means the
-            # old behaviour, unchanged.
-            absolute_pair = None
+            # Resolve ONCE here and hand the result to those sources.
+            #
+            # maja.31: the resolution is a LIST. Sonarr sends TheXEM's scene
+            # absolute number, which restarts per season on many anime — Slime's
+            # "17" is S01E17 through S04E17. Picking one silently made season 1
+            # the answer to every such request. Sources that fetch whole series
+            # and filter locally get the full set and can accept any of them;
+            # sources that bake season/episode into their query get the best
+            # single candidate. Fail-open: an empty list is the old behaviour.
+            absolute_candidates = []
             if imdb_id and episode and not season:
-                from quasarr.providers.sonarr_api import resolve_absolute_numbering
+                from quasarr.providers.sonarr_api import resolve_absolute_candidates
 
-                absolute_pair = resolve_absolute_numbering(
+                absolute_candidates = resolve_absolute_candidates(
                     shared_state, imdb_id, episode
                 )
 
@@ -203,24 +217,42 @@ def get_search_results(
                     continue
 
                 source_season, source_episode = season, episode
+                source_pairs = None
 
-                if episode and not season and not source.supports_absolute_numbering:
-                    if not absolute_pair:
+                if episode and not season:
+                    if absolute_candidates:
+                        # Every source that can weigh alternatives gets them —
+                        # AL/AT included, so their season-specific search
+                        # variants ("Staffel 4") exist at all. Without a season
+                        # they fall back to the plain title, which is the show's
+                        # main page and therefore season 1.
+                        if getattr(source, "supports_candidate_pairs", False):
+                            source_pairs = list(absolute_candidates)
+                    if not source.supports_absolute_numbering:
+                        if not absolute_candidates:
+                            source_logger.trace(
+                                "Search with absolute EP number unsupported"
+                            )
+                            continue
+                        source_season, source_episode = absolute_candidates[0]
                         source_logger.trace(
-                            "Search with absolute EP number unsupported"
+                            f"Absolute E{episode} translated to "
+                            f"S{source_season}E{source_episode}"
+                            + (
+                                f" (of {len(absolute_candidates)} candidates)"
+                                if len(absolute_candidates) > 1
+                                else ""
+                            )
                         )
-                        continue
-                    source_season, source_episode = absolute_pair
-                    source_logger.trace(
-                        f"Absolute E{episode} translated to "
-                        f"S{source_season}E{source_episode}"
-                    )
 
                 kwargs = {
                     "search_string": imdb_id,
                     "season": source_season,
                     "episode": source_episode,
                 }
+
+                if source_pairs:
+                    kwargs["accepted_pairs"] = source_pairs
 
                 if episode_date:
                     if not source.supports_date_numbering:

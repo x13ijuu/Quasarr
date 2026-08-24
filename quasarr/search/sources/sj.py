@@ -38,6 +38,7 @@ class Source(AbstractSearchSource):
     supports_imdb = True
     supports_phrase = False
     supports_date_numbering = True
+    supports_candidate_pairs = True
     supported_categories = [SEARCH_CAT_SHOWS, SEARCH_CAT_SHOWS_ANIME]
     requires_login = True
 
@@ -135,6 +136,7 @@ class Source(AbstractSearchSource):
         season: int = None,
         episode: int = None,
         episode_date=None,
+        accepted_pairs=None,
     ) -> list[SearchRelease]:
         releases = []
 
@@ -247,6 +249,7 @@ class Source(AbstractSearchSource):
                             season,
                             episode,
                             episode_date,
+                            accepted_pairs=accepted_pairs,
                         ):
                             continue
 

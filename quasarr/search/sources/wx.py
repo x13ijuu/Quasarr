@@ -42,6 +42,7 @@ class Source(AbstractSearchSource):
     supports_imdb = True
     supports_phrase = False
     supports_date_numbering = False
+    supports_candidate_pairs = True
     supported_categories = [SEARCH_CAT_MOVIES, SEARCH_CAT_SHOWS, SEARCH_CAT_SHOWS_ANIME]
 
     def feed(
@@ -169,6 +170,7 @@ class Source(AbstractSearchSource):
         search_string: str = "",
         season: int = None,
         episode: int = None,
+        accepted_pairs=None,
     ) -> list[SearchRelease]:
         """
         Search using internal API.
@@ -302,7 +304,12 @@ class Source(AbstractSearchSource):
                         title = title.replace(" ", ".")
 
                         if is_valid_release(
-                            title, search_category, search_string, season, episode
+                            title,
+                            search_category,
+                            search_string,
+                            season,
+                            episode,
+                            accepted_pairs=accepted_pairs,
                         ):
                             # Skip if we've already seen this exact title
                             if title in seen_titles:
@@ -365,6 +372,7 @@ class Source(AbstractSearchSource):
                                     search_string,
                                     season,
                                     episode,
+                                    accepted_pairs=accepted_pairs,
                                 ):
                                     continue
 
