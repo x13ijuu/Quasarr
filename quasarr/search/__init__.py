@@ -227,7 +227,12 @@ def get_search_results(
                         # they fall back to the plain title, which is the show's
                         # main page and therefore season 1.
                         if getattr(source, "supports_candidate_pairs", False):
-                            source_pairs = list(absolute_candidates)
+                            # Tuple, nicht Liste: die kwargs landen im
+                            # Cache-Schluessel (frozenset(kwargs.items())) und
+                            # muessen hashbar sein.
+                            source_pairs = tuple(
+                                tuple(pair) for pair in absolute_candidates
+                            )
                     if not source.supports_absolute_numbering:
                         if not absolute_candidates:
                             source_logger.trace(
@@ -414,6 +419,25 @@ def get_search_results(
     return sliced_results
 
 
+def _hashable(value):
+    """Return a hashable stand-in for a kwarg value.
+
+    Maja fork: the search cache key is ``frozenset(kwargs.items())``, so a single
+    unhashable kwarg raised TypeError inside the executor — and a search that
+    raises returns ZERO releases to Sonarr. That looks exactly like "this source
+    has nothing", which is the silent-wrongness class this fork exists to remove.
+    Normalising here means a future list-valued kwarg costs a tuple conversion
+    instead of every anime search.
+    """
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_hashable(item) for item in value)
+    if isinstance(value, dict):
+        return tuple(sorted((k, _hashable(v)) for k, v in value.items()))
+    return value
+
+
 class SearchExecutor:
     def __init__(self, deadline=None):
         self.searches = []
@@ -441,7 +465,14 @@ class SearchExecutor:
         if cache_category is not None and len(key_args) >= 3:
             key_args[2] = cache_category
         key_args = tuple(key_args)
-        key = hash((source.initials, action, key_args, frozenset(kwargs.items())))
+        key = hash(
+            (
+                source.initials,
+                action,
+                key_args,
+                frozenset((k, _hashable(v)) for k, v in kwargs.items()),
+            )
+        )
         self.searches.append(
             (
                 key,
