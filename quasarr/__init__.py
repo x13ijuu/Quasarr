@@ -505,6 +505,16 @@ def waiting_worker(shared_state_dict, shared_state_lock):
 
                 if tick % HYGIENE_EVERY == 0:
                     run_history_hygiene(shared_state)
+                    # Maja fork: grab notes are scaffolding for the refusal
+                    # ledger and expire; the refusals themselves only get
+                    # trimmed when they are far past mattering.
+                    try:
+                        from quasarr.identity import refusals
+
+                        refusals.prune_grabs()
+                        refusals.prune()
+                    except Exception as e:
+                        debug(f"Refusal housekeeping skipped: {e}")
             except Exception as e:
                 error(f"waiting_worker tick failed: {e}")
             time.sleep(TICK)

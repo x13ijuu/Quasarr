@@ -386,6 +386,24 @@ def get_search_results(
         )
     results = filtered_results
 
+    # Maja fork: drop releases whose language claim the delivered files already
+    # disproved. Without this the ledger would be a diary — the dedupe key is
+    # the link, the link never changes, so the same release would be offered,
+    # grabbed and discarded again on the next pass. This is the half that
+    # actually breaks the circle.
+    try:
+        from quasarr.identity import refusals
+
+        results, refused = refusals.filter_refused(results)
+        if refused:
+            debug(
+                f"Filtered out <r>{len(refused)}</r> release(s) refused earlier "
+                f"(claim disproved by the delivered files)"
+            )
+    except Exception as e:
+        # Fail open: a broken ledger must never make a search return nothing.
+        debug(f"Refusal filter skipped: {e}")
+
     # Calculate pagination for logging and return
     total_count = len(results)
 

@@ -23,7 +23,7 @@ from quasarr.providers.host_bans import (
     record_ban,
 )
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
-from quasarr.providers.log import error, info, warn
+from quasarr.providers.log import debug, error, info, warn
 from quasarr.providers.notifications import (
     send_notification,
     send_tracked_notification,
@@ -766,6 +766,18 @@ def download(
         package_id = package_id or generate_deterministic_package_id(
             title, final_source_key, client_type, download_category
         )
+
+        # Maja fork: note who this grab belongs to. When the package finishes, the
+        # only identity in scope is the JD package + its comment (= package_id),
+        # and the package_id carries a per-grab nonce — it cannot lead back to the
+        # RELEASE. Without this note the refusal ledger could not name what it is
+        # refusing. Purely additive and fail-open; nothing downstream depends on it.
+        try:
+            from quasarr.identity import refusals
+
+            refusals.remember_grab(package_id, final_source_key, url, title)
+        except Exception as e:
+            debug(f"Could not remember grab identity for {package_id}: {e}")
 
         # Decide based on WHERE the package already exists (if anywhere).
         existing = find_existing_package(shared_state, package_id)
