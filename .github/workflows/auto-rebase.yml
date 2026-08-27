@@ -23,6 +23,14 @@ permissions:
   # Fallback-Kanal: darf Actions keine PRs anlegen, wird stattdessen ein Issue
   # erzeugt — damit ein gescheiterter Rebase NIE nur im Log steht.
   issues: write
+  # Der Push unten kann den Image-Build nicht selbst ausloesen: GitHub feuert
+  # keine on:push-Workflows fuer Pushes mit GITHUB_TOKEN (Rekursionsschutz).
+  # Der Job dispatcht release-fork.yml deshalb explizit — und dafuer braucht er
+  # actions:write. Ohne diese Zeile scheiterte am 2026-08-27 genau dieser
+  # Schritt mit "HTTP 403: Resource not accessible by integration", NACHDEM der
+  # Rebase bereits gepusht war: maja/main stand auf maja.34, ein Image dazu gab
+  # es nie.
+  actions: write
 
 jobs:
   rebase:
@@ -92,7 +100,42 @@ jobs:
           git push origin maja/main
           # Pushes mit GITHUB_TOKEN triggern keine on:push-Workflows — den
           # Image-Build daher explizit dispatchen (release-fork.yml hat workflow_dispatch).
-          gh workflow run release-fork.yml --ref maja/main
+          #
+          # Ab hier ist der Push UNWIDERRUFLICH durch. Scheitert der Dispatch,
+          # steht maja/main auf einem Patch-Level, zu dem es kein Image gibt —
+          # dreimal passiert (02./03.08. HTTP 404 Fork-Aufloesung, 27.08. HTTP 403
+          # fehlendes actions:write). Ein blosses `exit 1` verschwindet im Log,
+          # weil ci-watch den Fork nicht sieht. Also legt der Schritt dasselbe
+          # Issue an wie der PR-Fallback ("auto-rebase braucht Hand: …"), auf das
+          # maja-hq/update-path-watch bereits horcht — und scheitert danach laut.
+          if ! gh workflow run release-fork.yml --ref maja/main; then
+            level="$(grep -oP 'MAJA_PATCH_LEVEL\s*=\s*\K\d+' quasarr/providers/version.py || echo '?')"
+            title="auto-rebase braucht Hand: Image-Build fuer maja.${level} nicht ausgeloest"
+            have="$(gh issue list --state open --search "$title in:title" \
+                      --json number -q '.[0].number' 2>/dev/null || true)"
+            if [ -z "$have" ]; then
+              gh issue create --title "$title" --body \
+          "Der Rebase auf upstream ${{ steps.up.outputs.latest }} ist gelungen und \`maja/main\` ist
+          **gepusht** (maja.${level}) — aber der Dispatch von \`release-fork.yml\` ist gescheitert.
+
+          **Zustand:** \`maja/main\` traegt maja.${level}, ein Image dazu existiert NICHT.
+          Der Live-Container laeuft weiter auf dem vorigen Pin; es ist nichts kaputt,
+          aber der Fork ist dem Deployment voraus.
+
+          **Von Hand:**
+          \`\`\`
+          gh workflow run release-fork.yml --repo ${{ github.repository }} --ref maja/main
+          \`\`\`
+          Danach den Pin in RepoInfra (\`media-stack/docker-compose.yml\`) nachziehen.
+
+          Dritter Vorfall dieser Klasse (02./03.08. HTTP 404, 27.08. HTTP 403)." \
+                || echo "::warning::Issue konnte nicht angelegt werden."
+            else
+              echo "::notice::Issue #$have besteht bereits."
+            fi
+            echo "::error::Image-Build fuer maja.${level} nicht ausgeloest — maja/main ist gepusht, das Image fehlt."
+            exit 1
+          fi
 
       - name: Open PR instead (conflict or red tests)
         if: steps.up.outputs.action == 'rebase' && (steps.merge.outputs.state == 'conflict' || steps.tests.outcome == 'failure')
