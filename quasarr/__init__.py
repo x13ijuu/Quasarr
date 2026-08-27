@@ -89,6 +89,7 @@ def run():
 
         print("\n===== Recommended Services =====")
         print('👉 Fast premium downloads: "https://linksnappy.com/?ref=397097" 👈')
+        print('👉 Fallback multihoster: "https://debrid-link.com/id/EuXk5" 👈')
         print(
             '👉 Automated CAPTCHA solutions: "https://github.com/rix1337/Quasarr?tab=readme-ov-file#sponsorshelper" 👈'
         )

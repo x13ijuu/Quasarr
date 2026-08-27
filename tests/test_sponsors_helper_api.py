@@ -123,7 +123,7 @@ class SponsorsHelperApiTests(unittest.TestCase):
         self.assertEqual("Supported.Second", data["title"])
         self.assertEqual("https://alpha.invalid/f/abc", prioritized_links[0][0])
 
-    def test_select_helper_package_accepts_advertised_mirror(self):
+    def test_select_helper_package_skips_he_even_when_helper_advertises_mirror(self):
         protected_packages = [
             (
                 "pkg-1",
@@ -137,12 +137,9 @@ class SponsorsHelperApiTests(unittest.TestCase):
             )
         ]
 
-        package_id, _, links = select_helper_package(
-            protected_packages, ["container."], ["he"]
+        self.assertIsNone(
+            select_helper_package(protected_packages, ["container."], ["he"])
         )
-
-        self.assertEqual("pkg-1", package_id)
-        self.assertEqual("he", links[0][1])
 
     def test_select_helper_package_returns_none_when_nothing_matches(self):
         protected_packages = [

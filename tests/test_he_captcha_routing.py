@@ -105,6 +105,36 @@ class HeCaptchaRoutingTests(unittest.TestCase):
         self.assertEqual({"links": [], "imdb_id": None, "inconclusive": True}, result)
         session.post.assert_called_once()
 
+    def test_standard_strategy_saves_latest_unparsed_html_to_config_path(self):
+        html = "<html><body>Unexpected HE page</body></html>"
+        session = Session(html, UNLOCKED_HTML)
+        shared_state = SimpleNamespace(values={"configfile": "/config/Quasarr.ini"})
+
+        with (
+            patch.object(he.requests, "Session", return_value=session),
+            patch.object(
+                he.tempfile,
+                "mkstemp",
+                return_value=(42, "/config/.HE_unparsed_test.html"),
+            ),
+            patch.object(he.os, "fdopen") as fdopen,
+            patch.object(he.os, "replace") as replace,
+            patch.object(he, "info") as info,
+        ):
+            result = he._strategy_standard(
+                SOURCE_URL, {"User-Agent": "test-agent"}, shared_state
+            )
+
+        self.assertIsNone(result)
+        fdopen.assert_called_once_with(42, "w", encoding="utf-8")
+        fdopen.return_value.__enter__.return_value.write.assert_called_once_with(html)
+        replace.assert_called_once_with(
+            "/config/.HE_unparsed_test.html", "/config/HE_unparsed.html"
+        )
+        info.assert_called_once_with(
+            'Could not parse HE page HTML. Saved latest copy to "/config/HE_unparsed.html".'
+        )
+
     def test_flaresolverr_parks_captcha_returned_after_post(self):
         shared_state = SimpleNamespace()
 
