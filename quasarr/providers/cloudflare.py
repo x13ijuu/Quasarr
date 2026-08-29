@@ -3,10 +3,12 @@
 # Project by https://github.com/rix1337
 
 import json
+import os
 import threading
 import time
 import urllib.parse
 import uuid
+from contextlib import contextmanager
 
 import requests
 from bs4 import BeautifulSoup
@@ -21,6 +23,62 @@ from quasarr.providers.utils import is_flaresolverr_available
 _CLOUDFLARE_GATE_TTL_SECONDS = 24 * 60 * 60
 _cloudflare_gate_expires_at = {}
 _cloudflare_gate_lock = threading.Lock()
+
+# --- Maja fork: concurrency cap for FlareSolverr solves ----------------------
+#
+# Every solve is a Chrome. A sessionless request spawns a fresh one per request
+# (flaresolverr_service.py: `driver = utils.get_webdriver(...)`), a session keeps
+# one alive. Nothing on either side bounds how many run at once: FlareSolverr's
+# SessionsStorage has no cap and no TTL, and the search fan-out deliberately
+# starts one worker PER SOURCE (search/__init__.py: "One worker per source"),
+# with cache families running in parallel on top and Sonarr plus Radarr asking
+# at the same time.
+#
+# Measured 2026-08-30 against three live targets: a single solve peaks at
+# 320-380 MB over a ~540 MB idle baseline. Against the 2048 MB cgroup limit that
+# leaves room for four concurrent solves — so the container did not "leak", it
+# simply ran more browsers than fit, and hitting the ceiling put the cgroup into
+# reclaim thrash: sessions.create then fails and the source drops out of the
+# response after the fan-out deadline. Raising the limit only moves the ceiling
+# (measured: capped at 1536 MB it pinned at 1536, at 2048 MB it pinned at 2048).
+#
+# Default 3 = (2048 - 540) / 380, rounded down, minus one solve of headroom.
+FLARESOLVERR_MAX_CONCURRENT = int(os.environ.get("FLARESOLVERR_MAX_CONCURRENT", "3"))
+# Upper bound on queueing, so a slot wait can never eat the whole fan-out budget:
+# a solve takes ~12 s, so 30 s covers two waves of waiters.
+FLARESOLVERR_SLOT_WAIT_SECONDS = int(
+    os.environ.get("FLARESOLVERR_SLOT_WAIT", "30")
+)
+_solve_slots = threading.BoundedSemaphore(max(1, FLARESOLVERR_MAX_CONCURRENT))
+
+
+@contextmanager
+def _solve_slot(timeout=None):
+    """Hold one of the concurrent-solve slots, or refuse.
+
+    Saturation behaves like an unreachable source (RuntimeError, which every
+    caller already treats as "this host gave us nothing") rather than blocking:
+    waiting past the fan-out deadline would trade a memory problem for a timeout
+    problem, and Sonarr's 100 s limit is not configurable.
+    """
+    wait = FLARESOLVERR_SLOT_WAIT_SECONDS
+    if timeout:
+        wait = min(wait, timeout)
+    if not _solve_slots.acquire(timeout=wait):
+        # Logged, not silent: a cap set too low costs search hits, and that must
+        # be visible as a cause rather than as unexplained missing releases.
+        info(
+            f"FlareSolverr busy: no free solve slot after {wait}s "
+            f"(limit {FLARESOLVERR_MAX_CONCURRENT}) — skipping this request"
+        )
+        raise RuntimeError(
+            f"FlareSolverr is saturated ({FLARESOLVERR_MAX_CONCURRENT} concurrent "
+            f"solves); skipped after waiting {wait}s"
+        )
+    try:
+        yield
+    finally:
+        _solve_slots.release()
 
 
 def _cloudflare_gate_key(url):
@@ -377,12 +435,17 @@ def flaresolverr_get(
         payload["executeJs"] = execute_js
 
     try:
-        resp = requests.post(
-            flaresolverr_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=timeout + 10,
-        )
+        # Maja fork: one of a bounded number of concurrent solves. Held only for
+        # the request itself — a retained session keeps an idle browser between
+        # solves, which is cheap; the 320-380 MB peak happens here, while the
+        # page loads and renders.
+        with _solve_slot(timeout):
+            resp = requests.post(
+                flaresolverr_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=timeout + 10,
+            )
         resp.raise_for_status()
     except Exception as e:
         raise RuntimeError(f"Error communicating with FlareSolverr: {e}") from e
@@ -455,12 +518,17 @@ def flaresolverr_post(
         payload["headers"] = headers
 
     try:
-        resp = requests.post(
-            flaresolverr_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=timeout + 10,
-        )
+        # Maja fork: one of a bounded number of concurrent solves. Held only for
+        # the request itself — a retained session keeps an idle browser between
+        # solves, which is cheap; the 320-380 MB peak happens here, while the
+        # page loads and renders.
+        with _solve_slot(timeout):
+            resp = requests.post(
+                flaresolverr_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=timeout + 10,
+            )
         resp.raise_for_status()
     except Exception as e:
         raise RuntimeError(f"Error communicating with FlareSolverr: {e}") from e
