@@ -417,9 +417,9 @@ def waiting_worker(shared_state_dict, shared_state_lock):
     """
     try:
         shared_state.set_state(shared_state_dict, shared_state_lock)
-        from quasarr.providers import host_bans
         from quasarr.downloads import retry_waiting_package
         from quasarr.downloads.packages import run_history_hygiene
+        from quasarr.providers import host_bans
 
         TICK = 10
         HYGIENE_EVERY = 30  # ~5 min

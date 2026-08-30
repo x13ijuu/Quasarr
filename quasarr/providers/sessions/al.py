@@ -13,8 +13,8 @@ from bs4 import BeautifulSoup
 from requests.exceptions import RequestException, Timeout
 
 from quasarr.constants import SESSION_MAX_AGE_SECONDS, SESSION_REQUEST_TIMEOUT_SECONDS
-from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
 from quasarr.providers.cloudflare import solve_slot
+from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
 from quasarr.providers.log import debug, info, trace
 from quasarr.providers.utils import is_flaresolverr_available, is_site_usable
 
