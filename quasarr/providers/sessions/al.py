@@ -14,6 +14,7 @@ from requests.exceptions import RequestException, Timeout
 
 from quasarr.constants import SESSION_MAX_AGE_SECONDS, SESSION_REQUEST_TIMEOUT_SECONDS
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
+from quasarr.providers.cloudflare import solve_slot
 from quasarr.providers.log import debug, info, trace
 from quasarr.providers.utils import is_flaresolverr_available, is_site_usable
 
@@ -65,12 +66,15 @@ def create_and_persist_session(shared_state):
         }
 
         try:
-            fs_resp = requests.post(
-                flaresolverr_url,
-                headers=fs_headers,
-                json=fs_payload,
-                timeout=SESSION_REQUEST_TIMEOUT_SECONDS,
-            )
+            # Eigener Solve (Session-Priming) — startet einen Browser und muss
+            # deshalb durch dieselbe Drossel wie die Solves in cloudflare.py.
+            with solve_slot(SESSION_REQUEST_TIMEOUT_SECONDS):
+                fs_resp = requests.post(
+                    flaresolverr_url,
+                    headers=fs_headers,
+                    json=fs_payload,
+                    timeout=SESSION_REQUEST_TIMEOUT_SECONDS,
+                )
             fs_resp.raise_for_status()
         except Timeout:
             info("FlareSolverr request timed out")
@@ -312,9 +316,14 @@ def fetch_via_flaresolverr(
     # Send the JSON request to FlareSolverr
     fs_headers = {"Content-Type": "application/json"}
     try:
-        resp = requests.post(
-            flaresolverr_url, headers=fs_headers, json=fs_payload, timeout=timeout + 10
-        )
+        # Eigener Solve (fetch_via_flaresolverr) — ebenfalls durch die Drossel.
+        with solve_slot(timeout):
+            resp = requests.post(
+                flaresolverr_url,
+                headers=fs_headers,
+                json=fs_payload,
+                timeout=timeout + 10,
+            )
     except requests.exceptions.RequestException as e:
         info(f"Could not reach FlareSolverr: {e}")
         mark_hostname_issue(hostname, "session", f"FlareSolverr error: {e}")

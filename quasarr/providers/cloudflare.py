@@ -53,7 +53,7 @@ _solve_slots = threading.BoundedSemaphore(max(1, FLARESOLVERR_MAX_CONCURRENT))
 
 
 @contextmanager
-def _solve_slot(timeout=None):
+def solve_slot(timeout=None):
     """Hold one of the concurrent-solve slots, or refuse.
 
     Saturation behaves like an unreachable source (RuntimeError, which every
@@ -262,9 +262,14 @@ def update_session_via_flaresolverr(
     # Send the JSON request to FlareSolverr
     fs_headers = {"Content-Type": "application/json"}
     try:
-        resp = requests.post(
-            flaresolverr_url, headers=fs_headers, json=fs_payload, timeout=timeout + 10
-        )
+        # Eigener Solve, also eigener Browser — muss durch dieselbe Drossel.
+        with solve_slot(timeout):
+            resp = requests.post(
+                flaresolverr_url,
+                headers=fs_headers,
+                json=fs_payload,
+                timeout=timeout + 10,
+            )
         resp.raise_for_status()
     except requests.exceptions.RequestException as e:
         info(f"Could not reach FlareSolverr: {e}")
@@ -439,7 +444,7 @@ def flaresolverr_get(
         # the request itself — a retained session keeps an idle browser between
         # solves, which is cheap; the 320-380 MB peak happens here, while the
         # page loads and renders.
-        with _solve_slot(timeout):
+        with solve_slot(timeout):
             resp = requests.post(
                 flaresolverr_url,
                 json=payload,
@@ -522,7 +527,7 @@ def flaresolverr_post(
         # the request itself — a retained session keeps an idle browser between
         # solves, which is cheap; the 320-380 MB peak happens here, while the
         # page loads and renders.
-        with _solve_slot(timeout):
+        with solve_slot(timeout):
             resp = requests.post(
                 flaresolverr_url,
                 json=payload,
@@ -564,12 +569,16 @@ def flaresolverr_create_session(shared_state, session_id=None):
         payload["session"] = session_id
 
     try:
-        resp = requests.post(
-            flaresolverr_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=SESSION_REQUEST_TIMEOUT_SECONDS,
-        )
+        # sessions.create startet sofort einen Browser, nicht erst der erste
+        # Solve darin — also ebenfalls durch die Drossel. destroy bleibt bewusst
+        # ungedeckelt: Aufraeumen darf nie an einer vollen Drossel haengen.
+        with solve_slot(SESSION_REQUEST_TIMEOUT_SECONDS):
+            resp = requests.post(
+                flaresolverr_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=SESSION_REQUEST_TIMEOUT_SECONDS,
+            )
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "ok":
