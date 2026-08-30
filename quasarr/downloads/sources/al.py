@@ -6,6 +6,7 @@ import base64
 import json
 import re
 import time
+import uuid
 from typing import List, Optional
 from urllib.parse import urlparse
 
@@ -79,7 +80,14 @@ class Source(AbstractDownloadSource):
             mark_hostname_issue(Source.initials, "download", "Session error")
             return {}
 
-        browser_session_id = flaresolverr_create_session(shared_state)
+        # Maja fork: pass our OWN session id. flaresolverr_create_session only
+        # schedules the orphan cleanup when the caller chose the id — a create
+        # that times out on our side but succeeds on FlareSolverr's would
+        # otherwise leave a browser nobody can name and nothing ever destroys
+        # (its SessionsStorage has no TTL).
+        browser_session_id = flaresolverr_create_session(
+            shared_state, str(uuid.uuid4())
+        )
         links = []
         try:
             details_page = fetch_via_flaresolverr(

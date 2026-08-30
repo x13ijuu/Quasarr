@@ -89,7 +89,14 @@ class Source(AbstractDownloadSource):
                         return {"links": [], "imdb_id": None}
                     text = r.text
                     status_code = r.status_code
-                except RuntimeError as fs_err:
+                except Exception as fs_err:
+                    # Maja fork: was `except RuntimeError`. The session is created
+                    # above but the outer `finally` that destroys it only guards
+                    # the PARSING block further down — so any exception here that
+                    # was not a RuntimeError left the browser running until the
+                    # external janitor swept it 45 minutes later. Every other
+                    # FlareSolverr call site in the codebase cleans up on all
+                    # paths; this one had a hole.
                     info(f"Access failed via FlareSolverr: {fs_err}")
                     if session_id:
                         flaresolverr_destroy_session(shared_state, session_id)
