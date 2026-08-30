@@ -47,10 +47,21 @@ def _page(tabs_html):
     )
 
 
-def _tab(dom_id, episodes=0):
+def _tab(dom_id, episodes=0, audio=()):
     links = "".join(f'<a data-loop="{i}">Folge {i + 1}</a>' for i in range(episodes))
     eps = f'<div class="episodes">{links}</div>' if episodes else ""
-    return f'<div class="tab-pane" id="download_{dom_id}">{eps}</div>'
+    # The speaker row is how the page states a release's audio tracks; the
+    # closed-captioning row next to it states subtitles and must never be read
+    # as audio.
+    flags = "".join(f'<i class="flag flag-{code}"></i>' for code in audio)
+    audio_row = (
+        f'<table><tr><th><i class="fa-volume-up"></i></th><td>{flags}</td></tr>'
+        '<tr><th><i class="fa-closed-captioning"></i></th>'
+        '<td><i class="flag flag-de"></i></td></tr></table>'
+        if audio
+        else ""
+    )
+    return f'<div class="tab-pane" id="download_{dom_id}">{audio_row}{eps}</div>'
 
 
 def _info(release_title):
@@ -122,9 +133,10 @@ class FeedTabResolutionTests(unittest.TestCase):
         got = self._resolve(soup, {1: self.WANTED, 4: self.WANTED}, self.WANTED)
         self.assertEqual(0, got)
 
-    def test_feed_grab_without_match_falls_back_but_bounds_check_still_bites(self):
-        # Scan-only phase: no unique match -> tab 1, exactly as before. What
-        # stops the live One Piece failure is the bounds check (1174 > 206).
+    def test_feed_grab_without_any_match_is_refused_not_guessed(self):
+        # No title match and no tab carrying the advertised audio. Tab 1 would
+        # be a guess, and guessing is what put japanese files under german
+        # names four times in a row.
         soup_html = str(_page(_tab(1, episodes=206) + _tab(4, episodes=74)))
         with (
             patch.object(
@@ -146,6 +158,105 @@ class FeedTabResolutionTests(unittest.TestCase):
         # 0 is the caller's abort signal ("No valid release ID found").
         self.assertEqual(0, release_id)
         self.assertEqual(self.WANTED, title)
+
+
+class AudioBasedTabResolutionTests(unittest.TestCase):
+    """Picking the release by the audio the title advertises.
+
+    The live shape (measured 2026-08-30 on a still-airing season): release 1
+    carries the original audio for every episode, release 2 carries the dub but
+    only for the episodes dubbed so far. The feed advertises the dub for every
+    episode, so tab 1 - the old blind fallback - is wrong for all of them.
+
+    Both halves of the question have to be answered together. Matching on audio
+    alone takes a tab that has no such episode; matching on the episode alone
+    takes the original audio. Only their intersection is the ordered thing.
+    """
+
+    DUBBED = "Show.Name.S04E17.German.ML.GerSub.EngSub.1080p.WEB-DL.x264"
+    LATER = "Show.Name.S04E20.German.ML.GerSub.EngSub.1080p.WEB-DL.x264"
+
+    # release 1: original audio, all 20 episodes | release 2: dub, first 17
+    PAGE = _tab(1, episodes=20, audio=["jp"]) + _tab(2, episodes=17, audio=["jp", "de"])
+
+    def _resolve(self, title, episode):
+        return al_download._resolve_release_id_by_audio(
+            _page(self.PAGE), title, episode
+        )
+
+    def test_picks_the_dubbed_release_when_it_has_the_episode(self):
+        # The obtainable case that was missed 20 times: the dub existed on
+        # release 2 the whole time.
+        self.assertEqual(2, self._resolve(self.DUBBED, 17))
+
+    def test_refuses_when_the_dub_does_not_reach_this_episode(self):
+        # Release 2 stops at 17, so nothing satisfies the claim for 20 - and
+        # release 1 must NOT be taken just because it has an episode 20.
+        self.assertEqual(0, self._resolve(self.LATER, 20))
+
+    def test_audio_alone_is_not_enough(self):
+        # Guard rail against a tempting simplification: dropping the episode
+        # half would return release 2 for episode 20.
+        soup = _page(self.PAGE)
+        by_audio_only = [
+            tab_id
+            for tab_id, tab in _iter_download_tabs(soup)
+            if "German" in al_download._tab_audio_languages(tab)
+        ]
+        self.assertEqual([2], by_audio_only)
+        self.assertEqual(0, self._resolve(self.LATER, 20))
+
+    def test_subtitle_flags_are_not_read_as_audio(self):
+        # Release 1 lists a german SUBTITLE. Reading that row as audio would
+        # make both tabs match and re-introduce the ambiguity.
+        soup = _page(self.PAGE)
+        tab = soup.find("div", id="download_1")
+        self.assertEqual(["Japanese"], al_download._tab_audio_languages(tab))
+
+    def test_title_without_a_language_claim_has_nothing_to_match_on(self):
+        self.assertEqual(0, self._resolve("Show.Name.S04E17.1080p.WEB-DL.x264", 17))
+
+    def test_ambiguous_audio_match_is_refused(self):
+        soup_html = _tab(1, episodes=20, audio=["de"]) + _tab(
+            2, episodes=20, audio=["de"]
+        )
+        self.assertEqual(
+            0,
+            al_download._resolve_release_id_by_audio(_page(soup_html), self.DUBBED, 17),
+        )
+
+
+class FeedGrabEndToEndTests(unittest.TestCase):
+    """The same two cases through `_check_release`, the way a real grab runs."""
+
+    DUBBED = "Show.Name.S04E17.German.ML.GerSub.EngSub.1080p.WEB-DL.x264"
+    LATER = "Show.Name.S04E20.German.ML.GerSub.EngSub.1080p.WEB-DL.x264"
+    PAGE = _tab(1, episodes=20, audio=["jp"]) + _tab(2, episodes=17, audio=["jp", "de"])
+
+    def _run(self, title, episode):
+        with (
+            patch.object(
+                al_download,
+                "_parse_info_from_download_item",
+                lambda *a, **k: _info("Unrelated.Title"),
+            ),
+            patch.object(al_download, "_guess_title", lambda _pt, ri: ri.release_title),
+        ):
+            return _check_release(
+                shared_state=None,
+                details_html=str(_page(self.PAGE)),
+                release_id=0,
+                title=title,
+                episode_in_title=episode,
+            )
+
+    def test_obtainable_dub_is_resolved_to_the_right_release(self):
+        _, release_id = self._run(self.DUBBED, 17)
+        self.assertEqual(2, release_id)
+
+    def test_unobtainable_dub_is_refused_rather_than_substituted(self):
+        _, release_id = self._run(self.LATER, 20)
+        self.assertEqual(0, release_id)
 
 
 class PositionalEpisodeBoundsTests(unittest.TestCase):

@@ -30,6 +30,7 @@ from quasarr.downloads.sources.helpers.anime_title import (
 from quasarr.downloads.sources.helpers.anime_title import (
     subtitle_tokens as _shared_subtitle_tokens,
 )
+from quasarr.identity.refusals import audio_languages
 from quasarr.providers.cloudflare import (
     flaresolverr_create_session,
     flaresolverr_destroy_session,
@@ -668,14 +669,7 @@ def _parse_info_from_download_item(
             resolution = "2160p" if h >= 2000 else "1080p" if h >= 1000 else "720p"
 
     # audio and subtitles
-    audio_codes = [
-        icon["class"][1].replace("flag-", "")
-        for icon in tab.select("tr:has(th>i.fa-volume-up) i.flag")
-    ]
-    audio_langs = [
-        {"jp": "Japanese", "de": "German", "en": "English"}.get(c, c.title())
-        for c in audio_codes
-    ]
+    audio_langs = _tab_audio_languages(tab)
     sub_codes = [
         icon["class"][1].replace("flag-", "")
         for icon in tab.select("tr:has(th>i.fa-closed-captioning) i.flag")
@@ -929,6 +923,17 @@ def _iter_download_tabs(soup):
             yield int(match.group(1)), tab
 
 
+def _tab_audio_languages(tab):
+    """The audio languages this tab advertises, read off its speaker-row flags."""
+    return [
+        {"jp": "Japanese", "de": "German", "en": "English"}.get(code, code.title())
+        for code in (
+            icon["class"][1].replace("flag-", "")
+            for icon in tab.select("tr:has(th>i.fa-volume-up) i.flag")
+        )
+    ]
+
+
 def _episode_loops(tab):
     """The data-loop values a tab offers, as a set of ints.
 
@@ -971,6 +976,49 @@ def _episode_link_count(tab):
     if not episodes_div:
         return None
     return len(episodes_div.find_all("a", attrs={"data-loop": re.compile(r"^\d+$")}))
+
+
+def _resolve_release_id_by_audio(soup, title, episode):
+    """Return the tab id whose AUDIO matches what ``title`` advertises, or 0.
+
+    The second way to answer "which release was meant" when a feed grab carries
+    no tab id and the title match came up empty. A details page can list the
+    same episode under several releases that differ only in audio - one
+    original-language, one dubbed - and the feed advertises the dubbed one while
+    the page's first tab is usually the other.
+
+    Measured 2026-08-30 on a still-airing season: the dub existed for episodes
+    1-17 on release 2, the feed advertised German for episode 20, and tab 1
+    (original audio only) was taken for all of them. Episode 17 was obtainable
+    in German the whole time and still came back with the wrong audio 20 times;
+    the manual search path, which carries a real tab id, fetched it correctly on
+    the first try.
+
+    Both halves are required: the tab must carry the advertised audio AND offer
+    the episode. A season whose dub trails the sub has tabs that satisfy one but
+    not the other, and taking either alone puts the wrong file on disk under the
+    right name.
+    """
+    claimed = audio_languages(title)
+    if not claimed:
+        return 0  # nothing was advertised, so there is nothing to match on
+
+    candidates = []
+    for tab_id, tab in _iter_download_tabs(soup):
+        if not claimed & set(_tab_audio_languages(tab)):
+            continue
+        if episode and _tab_offers_episode(tab, episode) is False:
+            continue
+        candidates.append(tab_id)
+
+    if len(candidates) == 1:
+        info(
+            f'Resolved feed grab "{title}" to release {candidates[0]} by audio '
+            f"({'/'.join(sorted(claimed))})"
+        )
+        return candidates[0]
+
+    return 0
 
 
 def _resolve_release_id_by_title(soup, title):
@@ -1047,23 +1095,32 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
         # Resolve it honestly instead: the grabbed title is known, so find the
         # tab that actually carries it.
         #
-        # When that does not produce a unique match we fall back to the old
-        # tab-1 behaviour ON PURPOSE, for now. The feed builds its title from
-        # less data than the details page (that is why upstream re-guesses at
-        # all), so a strict match would refuse feed grabs that work today - the
-        # Bleach RSS grabs on 2026-08-20 03:42/03:43 landed correctly this way.
-        # Per ADR 0025 this stays scan-only until the warn counter shows the
-        # match is reliable; the bounds check below is what actually stops the
-        # One Piece failure in the meantime.
+        # When the title match comes up empty, ask the second question: which
+        # tab carries the AUDIO the title advertises and offers this episode?
+        # That is the same question the search path answers by carrying a real
+        # tab id, and it is the one tab 1 got wrong every time.
+        #
+        # Only when the title advertises nothing to match on do we still fall
+        # back to tab 1 - the feed builds its title from less data than the
+        # details page, and refusing a grab we cannot judge would break feed
+        # grabs that work today (the Bleach RSS grabs on 2026-08-20 03:42/03:43
+        # landed correctly this way). A claim we CAN judge and cannot satisfy is
+        # refused: better no episode than the wrong one, the same rule maja.19
+        # and maja.25 already follow.
         matched = _resolve_release_id_by_title(soup, title)
+        if not matched:
+            matched = _resolve_release_id_by_audio(soup, title, episode_in_title)
         if matched:
             release_id = matched
+        elif audio_languages(title):
+            info(
+                f'Refusing feed grab "{title}": no release carries the '
+                "advertised audio for this episode - tab 1 would be a guess"
+            )
+            return title, 0
         else:
             release_id = 1
-            info(
-                f'Feed grab "{title}": no unique tab match, falling back to '
-                "release 1 (scan-only - would refuse once enforced)"
-            )
+            info(f'Feed grab "{title}": nothing to match on, falling back to release 1')
 
     tab = soup.find("div", class_="tab-pane", id=f"download_{release_id}")
 
