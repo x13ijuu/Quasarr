@@ -23,12 +23,23 @@ Deliberately conservative. A refusal is recorded ONLY when
 
   1. the advertised title claims German AUDIO (subtitle tokens stripped first —
      ``GerSub`` is a subtitle, never a rung on the audio ladder), and
-  2. at least one delivered filename names a DIFFERENT audio language, and
-  3. no delivered filename shows German audio.
+  2. at least one piece of delivered evidence names a DIFFERENT audio language,
+     and
+  3. no delivered evidence shows German audio.
 
-A delivered file that simply carries no language information proves nothing and
-is left alone. The cost of a false refusal is an unobtainable release, which is
-worse than one more wrong grab.
+"Advertised" means the title the client grabbed, kept in the grab note. It is
+NOT the package name: a source that re-guesses the title from its details page
+hands JDownloader the CORRECTED name, and comparing that against itself can only
+ever come out clean.
+
+The delivered evidence is that re-guessed package name TOGETHER with the real
+filenames. The files alone are not enough — they frequently name no audio
+language at all, while the re-guess is the source's own reading of what the
+release actually is.
+
+Evidence that carries no language information proves nothing and is left alone.
+The cost of a false refusal is an unobtainable release, which is worse than one
+more wrong grab.
 
 This module does NOT notify. Alerting is deterministic and lives on the Maja
 side (ADR 0026, "one alerting brain"): ``tools/observer/media-regrab-watch.sh``
@@ -48,7 +59,23 @@ from quasarr.providers.log import debug, info
 # audio; "Japanese.GerSub" claims Japanese audio with a German subtitle, and the
 # fork's own upgrade ladder makes the same distinction ("Die Leiter ist
 # AUDIO-basiert. Ein deutscher Untertitel obendrauf ist Tiebreak, keine Sprosse").
-_SUBTITLE_TOKEN = re.compile(r"(?i)\b(?:ger|eng|jap|de|en|jp)sub(?:bed|s)?\b")
+#
+# The marker also comes SPLIT, with the languages listed once and "Sub" trailing
+# the whole list ("…Ger.Eng.Sub.AAC.1080p…"). Read one token at a time that says
+# "German audio, English audio, something called Sub" — the exact opposite of
+# what it means. Measured 2026-08-30: this alone kept the ledger silent through
+# 74 grabs of one episode, because the delivered file "showed German" and rule 3
+# cleared the package.
+# Only the SHORT forms may be swallowed by a trailing "Sub". The long form
+# ("German", "Japanese") is how these titles spell an audio track, and letting
+# the pattern reach across it would erase the very language the comparison
+# needs: "Japanese.Ger.Eng.Sub" is Japanese audio with two subtitle tracks, not
+# a release with no audio at all.
+_SUBTITLE_LANGUAGE = r"(?:ger|eng|jap|jpn|de|en|jp)"
+_SUBTITLE_TOKEN = re.compile(
+    r"(?i)\b" + _SUBTITLE_LANGUAGE + r"(?:[._\-\s]" + _SUBTITLE_LANGUAGE + r")*"
+    r"[._\-\s]?sub(?:bed|s)?\b"
+)
 
 # Audio markers, deliberately narrow. Bare "ger" only counts when it stands as
 # its own token (e.g. "[GER-JAP]"), never as the prefix of something else.

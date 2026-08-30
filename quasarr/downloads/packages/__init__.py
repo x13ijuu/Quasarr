@@ -599,28 +599,46 @@ def get_packages(shared_state, _cache=None, auto_start=True):
             finished = link_details["all_finished"]
 
             # Maja fork: the one moment where claim and reality are both in
-            # scope. `package_name` is the title we handed Sonarr (download()
-            # sets packageName = title), `filenames` is what JDownloader
-            # actually pulled. If the files disprove the title's audio claim,
-            # the release is refused for good — that is the only thing that
-            # breaks the grab/import/discard/regrab circle, because Sonarr sees
-            # each pass as a success and will happily repeat it forever
-            # (measured: Slime S04E19, 93 grabs in 14 days).
+            # scope. If the delivery disproves the title's audio claim, the
+            # release is refused for good — that is the only thing that breaks
+            # the grab/import/discard/regrab circle, because Sonarr sees each
+            # pass as a success and will happily repeat it forever (measured:
+            # S04E19, 93 grabs in 14 days).
+            #
+            # The CLAIM is the advertised title from the grab note, NOT
+            # `package_name`. A source that re-guesses the title from its
+            # details page (AL does) hands JDownloader the CORRECTED name, so by
+            # the time we get here the German claim is already gone and every
+            # comparison came out clean — the ledger stayed empty through 74
+            # further grabs of one episode on 2026-08-30 while the loop ran.
+            #
+            # That correction is itself evidence, and the strongest we have: the
+            # delivered files often name no audio language at all, while the
+            # re-guessed name is the source's own reading of its details page.
+            # So both are weighed — advertised claim against everything the
+            # download actually turned out to be.
             if finished and not error:
                 try:
                     from quasarr.identity import refusals
 
+                    grab = refusals.recall_grab(comment)
+                    advertised = (grab or {}).get("title") or package_name
+                    delivered_evidence = list(link_details.get("filenames") or [])
+                    if package_name and package_name != advertised:
+                        # Only a CORRECTED name is evidence. An untouched one is
+                        # the claim itself, and letting the claim vouch for
+                        # itself would clear every package on rule 3.
+                        delivered_evidence.insert(0, package_name)
                     contradiction = refusals.language_contradiction(
-                        package_name, link_details.get("filenames")
+                        advertised, delivered_evidence
                     )
                     if contradiction:
                         claimed, delivered = contradiction
-                        grab = refusals.recall_grab(comment)
                         if grab:
                             refusals.record_refusal(
                                 grab.get("source_key"),
                                 grab.get("url"),
-                                package_name,
+                                advertised,
                                 claimed,
                                 delivered,
                                 package_id=comment,
@@ -630,7 +648,7 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                             # refusal we cannot name is one we could never lift.
                             # Log it and let it go.
                             debug(
-                                f"'{package_name}' claimed "
+                                f"'{advertised}' claimed "
                                 f"{'/'.join(sorted(claimed))} but delivered "
                                 f"{'/'.join(sorted(delivered))} — no grab note "
                                 f"for {comment}, not refusing"

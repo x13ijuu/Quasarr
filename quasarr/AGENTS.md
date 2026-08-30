@@ -11,7 +11,8 @@ Main application code for Quasarr: the bridge that exposes itself to Radarr/Sona
 - `quasarr/search/` - search/feed fan-out across source modules
 - `quasarr/providers/` - shared services (state, JD client, logging, auth, sessions, notifications, metadata)
 - `quasarr/storage/` - persistence (INI config, SQLite state) and first-run setup flows
-- `quasarr/constants/` and `quasarr/__init__.py` - owned by this doc (no child AGENTS.md)
+- `quasarr/identity/` - fork-only: the refusal ledger, which records a release whose delivery disproved its own title
+- `quasarr/constants/`, `quasarr/identity/`, and `quasarr/__init__.py` - owned by this doc (no child AGENTS.md)
 
 ## Local Contracts
 
