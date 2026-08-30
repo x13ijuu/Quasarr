@@ -80,7 +80,9 @@ _SUBTITLE_TOKEN = re.compile(
 # Audio markers, deliberately narrow. Bare "ger" only counts when it stands as
 # its own token (e.g. "[GER-JAP]"), never as the prefix of something else.
 _AUDIO_MARKERS = {
-    "German": re.compile(r"(?i)(?:^|[\W_])(?:german|deutsch|ger|dub-?ger|gerdub)(?:[\W_]|$)"),
+    "German": re.compile(
+        r"(?i)(?:^|[\W_])(?:german|deutsch|ger|dub-?ger|gerdub)(?:[\W_]|$)"
+    ),
     "Japanese": re.compile(r"(?i)(?:^|[\W_])(?:japanese|japanisch|jap|jpn)(?:[\W_]|$)"),
     "English": re.compile(r"(?i)(?:^|[\W_])(?:english|englisch|eng)(?:[\W_]|$)"),
     "Italian": re.compile(r"(?i)(?:^|[\W_])(?:italian|italienisch|ita)(?:[\W_]|$)"),
@@ -319,7 +321,9 @@ def prune(now=None):
     if not entries:
         return 0
 
-    stale = [k for k, v in entries.items() if current - v.get("created_at", 0) > MAX_AGE_S]
+    stale = [
+        k for k, v in entries.items() if current - v.get("created_at", 0) > MAX_AGE_S
+    ]
     if len(entries) - len(stale) > MAX_ENTRIES:
         fresh = sorted(
             ((k, v) for k, v in entries.items() if k not in stale),

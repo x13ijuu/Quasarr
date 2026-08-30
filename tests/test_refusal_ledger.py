@@ -18,6 +18,7 @@ coverage:
 Subtitles are not audio. `GerSub` on a Japanese release is a German subtitle,
 not a German dub; reading it as audio would refuse exactly the releases we want.
 """
+
 import json
 import os
 import tempfile
@@ -73,9 +74,7 @@ class LanguageComparisonTests(unittest.TestCase):
         # The dangerous silent case: refusing here would kill good releases.
         for name in ("episode17.mkv", "S04E19.mkv", "", "part1.rar"):
             with self.subTest(name=name):
-                self.assertIsNone(
-                    refusals.language_contradiction(SLIME_CLAIM, [name])
-                )
+                self.assertIsNone(refusals.language_contradiction(SLIME_CLAIM, [name]))
 
     def test_no_files_at_all_proves_nothing(self):
         self.assertIsNone(refusals.language_contradiction(SLIME_CLAIM, []))
@@ -102,7 +101,9 @@ class LanguageComparisonTests(unittest.TestCase):
 
     def test_bracket_notation_counts_as_german(self):
         # AL's other naming school: "650 - ONE PIECE [GER-JAP].mp4"
-        self.assertIn("German", refusals.audio_languages("650 - ONE PIECE [GER-JAP].mp4"))
+        self.assertIn(
+            "German", refusals.audio_languages("650 - ONE PIECE [GER-JAP].mp4")
+        )
 
     def test_split_subtitle_marker_is_not_audio(self):
         # The second naming school for the same statement: the languages are
@@ -128,7 +129,9 @@ class LanguageComparisonTests(unittest.TestCase):
         # releases it exists to protect.
         self.assertEqual(
             {"German"},
-            refusals.audio_languages("Show.Name.S04E20.German.DL.Ger.Eng.Sub.1080p.mkv"),
+            refusals.audio_languages(
+                "Show.Name.S04E20.German.DL.Ger.Eng.Sub.1080p.mkv"
+            ),
         )
         self.assertEqual(
             {"Japanese"},
@@ -244,8 +247,11 @@ class RefusalStoreTests(unittest.TestCase):
         self.assertEqual([], dropped)
 
         refusals.record_refusal(
-            "al", "https://al.invalid/media/slime", SLIME_CLAIM,
-            {"German"}, {"Japanese"},
+            "al",
+            "https://al.invalid/media/slime",
+            SLIME_CLAIM,
+            {"German"},
+            {"Japanese"},
         )
 
         kept, dropped = refusals.filter_refused([release])
@@ -254,8 +260,11 @@ class RefusalStoreTests(unittest.TestCase):
 
     def test_refusal_is_scoped_to_the_release_not_the_host(self):
         refusals.record_refusal(
-            "al", "https://al.invalid/media/slime", SLIME_CLAIM,
-            {"German"}, {"Japanese"},
+            "al",
+            "https://al.invalid/media/slime",
+            SLIME_CLAIM,
+            {"German"},
+            {"Japanese"},
         )
         other = self._release(source="https://al.invalid/media/one-piece")
         kept, dropped = refusals.filter_refused([other])
