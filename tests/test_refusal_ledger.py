@@ -18,6 +18,7 @@ coverage:
 Subtitles are not audio. `GerSub` on a Japanese release is a German subtitle,
 not a German dub; reading it as audio would refuse exactly the releases we want.
 """
+
 import json
 import os
 import tempfile
@@ -73,9 +74,7 @@ class LanguageComparisonTests(unittest.TestCase):
         # The dangerous silent case: refusing here would kill good releases.
         for name in ("episode17.mkv", "S04E19.mkv", "", "part1.rar"):
             with self.subTest(name=name):
-                self.assertIsNone(
-                    refusals.language_contradiction(SLIME_CLAIM, [name])
-                )
+                self.assertIsNone(refusals.language_contradiction(SLIME_CLAIM, [name]))
 
     def test_no_files_at_all_proves_nothing(self):
         self.assertIsNone(refusals.language_contradiction(SLIME_CLAIM, []))
@@ -102,7 +101,117 @@ class LanguageComparisonTests(unittest.TestCase):
 
     def test_bracket_notation_counts_as_german(self):
         # AL's other naming school: "650 - ONE PIECE [GER-JAP].mp4"
-        self.assertIn("German", refusals.audio_languages("650 - ONE PIECE [GER-JAP].mp4"))
+        self.assertIn(
+            "German", refusals.audio_languages("650 - ONE PIECE [GER-JAP].mp4")
+        )
+
+    def test_split_subtitle_marker_is_not_audio(self):
+        # The second naming school for the same statement: the languages are
+        # listed once and "Sub" trails the whole list. Token-by-token this reads
+        # as "German audio, English audio" — the exact opposite of what it says,
+        # and it cleared rule 3 through 74 grabs of one episode before it was
+        # found.
+        for name in (
+            "Show.Name.2018.S04E20.Ger.Eng.Sub.AAC.1080p.WebDL.x264-Group.mkv",
+            "Show.Name.S04E20.Ger-Eng-Sub.1080p.mkv",
+            "Show.Name.S04E20.Ger.Sub.1080p.mkv",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    set(),
+                    refusals.audio_languages(name),
+                    "a trailing 'Sub' governs every language in front of it",
+                )
+
+    def test_split_subtitle_marker_does_not_swallow_a_real_dub(self):
+        # The guard rail for the rule above: an actual dub named next to its
+        # subtitle list must survive, or the ledger starts refusing the very
+        # releases it exists to protect.
+        self.assertEqual(
+            {"German"},
+            refusals.audio_languages(
+                "Show.Name.S04E20.German.DL.Ger.Eng.Sub.1080p.mkv"
+            ),
+        )
+        self.assertEqual(
+            {"Japanese"},
+            refusals.audio_languages("Show.Name.S04E20.Japanese.Ger.Eng.Sub.1080p.mkv"),
+        )
+
+
+class AdvertisedClaimTests(unittest.TestCase):
+    """What the completion path feeds in (mirrors get_packages).
+
+    A source may re-guess the title from its details page, in which case the
+    name JDownloader carries is already CORRECTED. Comparing that against
+    itself can only ever come out clean — so the claim comes from the grab
+    note, and the corrected name joins the delivered evidence.
+    """
+
+    ADVERTISED = "Show.Name.S04E20.German.ML.GerSub.EngSub.1080p.WEB-DL.x264"
+    REGUESSED = "Show.Name.S04E20.Japanese.GerSub.EngSub.1080p.WEB-DL.x264-Group"
+    FILENAME = "Show.Name.2018.S04E20.Ger.Eng.Sub.AAC.1080p.WebDL.x264-Group.part1.rar"
+
+    @classmethod
+    def _evidence(cls, package_name, filenames, advertised=None):
+        evidence = list(filenames or [])
+        if package_name and package_name != (advertised or cls.ADVERTISED):
+            evidence.insert(0, package_name)
+        return evidence
+
+    def test_reguessed_title_no_longer_hides_the_claim(self):
+        # The whole loop in one assertion: advertised German, delivered
+        # Japanese, and the only reason it went unnoticed for 74 grabs was that
+        # the comparison used the corrected name on both sides.
+        self.assertIsNone(
+            refusals.language_contradiction(
+                self.REGUESSED, self._evidence(self.REGUESSED, [self.FILENAME])
+            ),
+            "the old comparison could not see it — kept as the reason why",
+        )
+        result = refusals.language_contradiction(
+            self.ADVERTISED, self._evidence(self.REGUESSED, [self.FILENAME])
+        )
+        self.assertIsNotNone(result, "advertised claim vs. corrected name is the proof")
+        claimed, delivered = result
+        self.assertEqual({"German"}, claimed)
+        self.assertEqual({"Japanese"}, delivered)
+
+    def test_files_alone_would_not_have_been_enough(self):
+        # Why the corrected package name is weighed at all: the real files name
+        # subtitles only, and evidence without an audio language proves nothing.
+        self.assertIsNone(
+            refusals.language_contradiction(self.ADVERTISED, [self.FILENAME])
+        )
+
+    def test_untouched_title_keeps_the_legacy_behaviour(self):
+        # The unchanged path: no re-guess, so advertised == package name and the
+        # verdict still rests on the filenames.
+        honest = "Show.Name.S01E18.German.ML.GerSub.EngSub.1080p.WEB-DL.x264-Group"
+        evidence = self._evidence(
+            honest, ["Show.Name.S01E18.English.1080p.mkv"], advertised=honest
+        )
+        self.assertEqual(
+            ["Show.Name.S01E18.English.1080p.mkv"],
+            evidence,
+            "an uncorrected name must not vouch for its own claim",
+        )
+        result = refusals.language_contradiction(honest, evidence)
+        self.assertIsNotNone(result)
+        claimed, delivered = result
+        self.assertEqual({"German"}, claimed)
+        self.assertEqual({"English"}, delivered)
+
+    def test_a_correct_delivery_is_still_never_refused(self):
+        self.assertIsNone(
+            refusals.language_contradiction(
+                self.ADVERTISED,
+                self._evidence(
+                    "Show.Name.S04E20.German.DL.1080p.WEB-DL.x264-Group",
+                    ["Show.Name.S04E20.German.DL.1080p.mkv"],
+                ),
+            )
+        )
 
 
 class RefusalStoreTests(unittest.TestCase):
@@ -138,8 +247,11 @@ class RefusalStoreTests(unittest.TestCase):
         self.assertEqual([], dropped)
 
         refusals.record_refusal(
-            "al", "https://al.invalid/media/slime", SLIME_CLAIM,
-            {"German"}, {"Japanese"},
+            "al",
+            "https://al.invalid/media/slime",
+            SLIME_CLAIM,
+            {"German"},
+            {"Japanese"},
         )
 
         kept, dropped = refusals.filter_refused([release])
@@ -148,8 +260,11 @@ class RefusalStoreTests(unittest.TestCase):
 
     def test_refusal_is_scoped_to_the_release_not_the_host(self):
         refusals.record_refusal(
-            "al", "https://al.invalid/media/slime", SLIME_CLAIM,
-            {"German"}, {"Japanese"},
+            "al",
+            "https://al.invalid/media/slime",
+            SLIME_CLAIM,
+            {"German"},
+            {"Japanese"},
         )
         other = self._release(source="https://al.invalid/media/one-piece")
         kept, dropped = refusals.filter_refused([other])

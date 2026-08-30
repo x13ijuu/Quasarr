@@ -18,10 +18,10 @@ import unittest
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
-from quasarr.providers import shared_state as shared_state_module
-from quasarr.storage.sqlite_database import DataBase
 import quasarr.downloads as downloads
 from quasarr.downloads import download, find_existing_package
+from quasarr.providers import shared_state as shared_state_module
+from quasarr.storage.sqlite_database import DataBase
 
 
 class FindExistingPackageTests(unittest.TestCase):
@@ -169,7 +169,7 @@ class DownloadRetryTests(unittest.TestCase):
 
     def test_banned_host_gate_parks_without_hitting_source(self):
         """When the host is already known-banned, the grab is parked without a request."""
-        from quasarr.providers.host_bans import record_ban, get_waiting
+        from quasarr.providers.host_bans import get_waiting, record_ban
 
         record_ban("al", "noadblock")
         title = "Bleach.E61.German.1080p.WEB-DL"

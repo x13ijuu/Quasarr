@@ -13,7 +13,7 @@ from xml.etree import ElementTree
 from bottle import request
 
 from quasarr.constants import SEARCH_FANOUT_DEADLINE_SECONDS
-from quasarr.downloads import download, enqueue_grab
+from quasarr.downloads import enqueue_grab
 from quasarr.downloads.packages import delete_package, get_packages
 from quasarr.providers import shared_state
 from quasarr.providers.auth import require_api_key

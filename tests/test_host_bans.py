@@ -10,8 +10,8 @@ import os
 import tempfile
 import unittest
 
-from quasarr.providers import shared_state as shared_state_module
 from quasarr.providers import host_bans as hb
+from quasarr.providers import shared_state as shared_state_module
 
 
 class HostBanBaseTest(unittest.TestCase):

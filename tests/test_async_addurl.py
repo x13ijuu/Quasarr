@@ -17,11 +17,10 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from quasarr.providers import shared_state as shared_state_module
-from quasarr.storage.sqlite_database import DataBase
-import quasarr.downloads as downloads
 from quasarr.downloads import enqueue_grab
 from quasarr.providers import host_bans as hb
+from quasarr.providers import shared_state as shared_state_module
+from quasarr.storage.sqlite_database import DataBase
 
 
 class EnqueueGrabTests(unittest.TestCase):
