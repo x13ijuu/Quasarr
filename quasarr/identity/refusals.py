@@ -41,12 +41,38 @@ Evidence that carries no language information proves nothing and is left alone.
 The cost of a false refusal is an unobtainable release, which is worse than one
 more wrong grab.
 
+Two classes of refusal, deliberately kept apart
+----------------------------------------------
+
+``hard`` — the case above. A claim the delivered bytes disproved. It is a
+statement about the release, not about a moment, so it stands for ``MAX_AGE_S``.
+
+``soft`` — the release could not be RESOLVED at all: the source advertises it,
+but its page carries no matching release ("no tabs", no release id). Measured
+2026-08-31: One Piece E1176 was grabbed **29 times in seven hours**, and each
+time this module's caller logged a refusal it never recorded, so the next feed
+offered the release again unchanged. That is a different animal from a
+disproved claim — "not there yet" is usually temporary, because a source
+announces an episode before the release is posted. A permanent refusal would
+turn a few hours of lag into six months of an unobtainable episode.
+
+So a soft refusal backs OFF instead of banning: it hides the release for an
+hour, then six, then a day, and after that leaves it alone for a week. It
+expires on its own, and the episode returns the moment the source really has
+it. Every attempt is counted, so a release that is genuinely gone stops costing
+grabs quickly while one that was merely early comes back.
+
 This module does NOT notify. Alerting is deterministic and lives on the Maja
 side (ADR 0026, "one alerting brain"): ``tools/observer/media-regrab-watch.sh``
 already reports the repeat-grab class with the same language comparison.
 Quasarr enforces, the observer reports.
 
-Table: ``refusals``. Key ``"<source_key>|<url>"``, value a JSON blob.
+Table: ``refusals``. Key ``"<source_key>|<url>|<title>"``, value a JSON blob.
+The title is part of the identity because ``url`` is the SERIES page on AL, not
+the episode: the two-part key refused every episode of a show because one of
+them lied. Found live on 2026-08-31 — a single mislabelled Bleach episode had
+silenced the whole series until 2027. Two-part keys left over from that scheme
+are ignored on read and pruned on sight.
 """
 
 import json
@@ -90,11 +116,37 @@ _AUDIO_MARKERS = {
 
 _TABLE = "refusals"
 
+# Sources whose language flags sit on the release BLOCK rather than the
+# individual release — the whole reason a title here is a claim and not a fact
+# (see the module docstring). Both are anime-only sites.
+#
+# The comparison is scoped to them on purpose. Everywhere else a title states
+# the language of the thing it names, so a mismatch between title and filename
+# is far more likely to be Dual-Audio, a sample file or a sloppy container name
+# than a lie — and the penalty for reading one of those as a lie is a release
+# that can never be obtained again. Before this guard the check ran on every
+# finished package, films included.
+BLOCK_LANGUAGE_SOURCES = frozenset({"al", "at"})
+
+
+def advertises_block_language(source_key):
+    """May a title from this source be treated as a language CLAIM?"""
+    return (source_key or "").lower() in BLOCK_LANGUAGE_SOURCES
+
 # A refusal is a statement about a release, not about a moment. It does not
 # expire on its own — but a very old entry for a release nobody offers any more
 # is dead weight, so the store is trimmed opportunistically.
 MAX_AGE_S = 180 * 24 * 3600
 MAX_ENTRIES = 2000
+
+KIND_HARD = "hard"
+KIND_SOFT = "soft"
+
+# How long a release stays hidden after the n-th failure to resolve it. The
+# last value repeats: once a release has failed four times it is almost
+# certainly not coming, but "almost" is not "certainly", so it keeps getting a
+# weekly look rather than a permanent ban.
+SOFT_BACKOFF_S = (3600, 6 * 3600, 24 * 3600, 7 * 24 * 3600)
 
 
 def _db(table):
@@ -109,14 +161,49 @@ def _now(now=None):
     return time.time() if now is None else now
 
 
-def refusal_key(source_key, url):
+def normalize_title(title):
+    """Fold a release title to the form both sides of the ledger agree on.
+
+    The search result and the download payload carry the bare release title;
+    the newznab layer prefixes "[AL] " on the way out and the client hands it
+    back without one. Case and separator noise differ between the two as well,
+    so neither side is trusted to spell it identically.
+    """
+    text = str(title or "").strip()
+    if text.startswith("[") and "]" in text:
+        text = text.split("]", 1)[1].strip()
+    return re.sub(r"[\s._\-]+", ".", text).lower()
+
+
+def refusal_key(source_key, url, title=None):
     """Stable identity of a release across grabs.
 
     NOT the package_id — ``enqueue_grab`` mints a fresh nonce per grab, so it
-    identifies one attempt, not a release. ``(source_key, url)`` is what the
-    search result and the payload agree on.
+    identifies one attempt, not a release. ``(source_key, url, title)`` is what
+    the search result and the payload agree on.
+
+    The title is not decoration. On AL ``url`` is the series page, shared by
+    every episode of a show, so a key without the title refuses the series.
     """
-    return f"{(source_key or '').lower()}|{url or ''}"
+    return f"{(source_key or '').lower()}|{url or ''}|{normalize_title(title)}"
+
+
+def _is_legacy_key(key):
+    """True for the two-part keys written before the title joined the identity."""
+    return str(key or "").count("|") < 2
+
+
+def _is_active(blob, now=None):
+    """Is this refusal still in force?
+
+    A hard refusal has no expiry — it is a statement about the release. A soft
+    one carries ``expires_at`` and lapses on its own; a blob without one is
+    read as hard, which is how entries written before the split behave.
+    """
+    expires_at = (blob or {}).get("expires_at")
+    if not expires_at:
+        return True
+    return _now(now) < expires_at
 
 
 # --- grab identity ---------------------------------------------------------
@@ -230,8 +317,9 @@ def record_refusal(
     source_key, url, title, claimed, delivered, package_id=None, now=None
 ):
     """Persist a disproved claim. Fail-open: a broken store never breaks a grab."""
-    key = refusal_key(source_key, url)
+    key = refusal_key(source_key, url, title)
     blob = {
+        "kind": KIND_HARD,
         "source_key": (source_key or "").lower(),
         "url": url or "",
         "title": title or "",
@@ -253,9 +341,59 @@ def record_refusal(
         return False
 
 
-def is_refused(source_key, url):
+def record_unresolvable(source_key, url, title, reason, now=None):
+    """Back a release off after its source could not resolve it.
+
+    Called where the download path already knew it had nothing to grab and, up
+    to maja.38, only logged it. Each call escalates the hold along
+    ``SOFT_BACKOFF_S``; nothing here is permanent, so an episode that was merely
+    announced early returns by itself.
+
+    Never overrides a hard refusal — a disproved claim outranks a missing one.
+    """
+    key = refusal_key(source_key, url, title)
+    current = _now(now)
+
+    attempts = 1
     try:
-        return _db(_TABLE).retrieve(refusal_key(source_key, url)) is not None
+        raw = _db(_TABLE).retrieve(key)
+        if raw:
+            previous = json.loads(raw)
+            if previous.get("kind") == KIND_HARD or not previous.get("expires_at"):
+                return False
+            attempts = int(previous.get("attempts", 0)) + 1
+    except Exception as e:
+        debug(f"Could not read previous refusal for {key}: {e}")
+
+    hold = SOFT_BACKOFF_S[min(attempts, len(SOFT_BACKOFF_S)) - 1]
+    blob = {
+        "kind": KIND_SOFT,
+        "source_key": (source_key or "").lower(),
+        "url": url or "",
+        "title": title or "",
+        "reason": str(reason or "")[:200],
+        "attempts": attempts,
+        "created_at": current,
+        "expires_at": current + hold,
+    }
+    try:
+        _db(_TABLE).update_store(key, json.dumps(blob))
+        info(
+            f"Holding back <r>{title}</r> for {hold // 3600}h "
+            f"(attempt {attempts}, {blob['reason']})"
+        )
+        return True
+    except Exception as e:
+        debug(f"Could not record unresolvable refusal for {key}: {e}")
+        return False
+
+
+def is_refused(source_key, url, title=None, now=None):
+    try:
+        raw = _db(_TABLE).retrieve(refusal_key(source_key, url, title))
+        if not raw:
+            return False
+        return _is_active(json.loads(raw), now)
     except Exception as e:
         debug(f"Refusal lookup failed for {source_key}: {e}")
         return False
@@ -276,41 +414,56 @@ def all_refusals():
     return out
 
 
-def delete_refusal(source_key, url):
+def delete_refusal(source_key, url, title=None):
     try:
-        _db(_TABLE).delete(refusal_key(source_key, url))
+        _db(_TABLE).delete(refusal_key(source_key, url, title))
         return True
     except Exception as e:
         debug(f"Could not delete refusal for {source_key}: {e}")
         return False
 
 
-def filter_refused(releases):
+def filter_refused(releases, now=None):
     """Drop refused releases from a search result list.
 
     Returns ``(kept, dropped)``. One store read per call, not one per release —
     this sits in the hot path of every search.
+
+    Soft refusals expire, so a matching key is not on its own a reason to drop;
+    the blob decides. Only the blobs of releases that actually matched are
+    parsed, which keeps the cost proportional to the hits rather than to the
+    size of the ledger.
     """
     if not releases:
         return releases, []
 
-    # Keys only — this runs on every search, and the JSON bodies are evidence
-    # for a human, not something the filter needs.
     try:
         rows = _db(_TABLE).retrieve_all_titles() or []
     except Exception as e:
         debug(f"Refusal filter could not read the ledger: {e}")
         return releases, []
 
-    refused = {key for key, _value in rows}
+    refused = {key: value for key, value in rows if not _is_legacy_key(key)}
     if not refused:
         return releases, []
 
     kept, dropped = [], []
     for release in releases:
         details = release.get("details", {}) or {}
-        key = refusal_key(details.get("hostname"), details.get("source"))
-        (dropped if key in refused else kept).append(release)
+        key = refusal_key(
+            details.get("hostname"), details.get("source"), details.get("title")
+        )
+        raw = refused.get(key)
+        if raw is None:
+            kept.append(release)
+            continue
+        try:
+            active = _is_active(json.loads(raw), now)
+        except Exception:
+            # An unreadable blob is not evidence. Offering a release one time
+            # too many is recoverable; hiding it on a parse error is not.
+            active = False
+        (dropped if active else kept).append(release)
     return kept, dropped
 
 
@@ -322,7 +475,11 @@ def prune(now=None):
         return 0
 
     stale = [
-        k for k, v in entries.items() if current - v.get("created_at", 0) > MAX_AGE_S
+        k
+        for k, v in entries.items()
+        if _is_legacy_key(k)
+        or not _is_active(v, current)
+        or current - v.get("created_at", 0) > MAX_AGE_S
     ]
     if len(entries) - len(stale) > MAX_ENTRIES:
         fresh = sorted(

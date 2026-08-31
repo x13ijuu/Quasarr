@@ -622,6 +622,16 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                     from quasarr.identity import refusals
 
                     grab = refusals.recall_grab(comment)
+                    # Only sources that carry their language flags on the
+                    # release BLOCK make a title a claim worth disproving.
+                    # Elsewhere a title states what it names, and a mismatch
+                    # against a filename is far more likely to be Dual-Audio or
+                    # a sample than a lie - so the comparison stays out of it
+                    # rather than risk banning a release for good. Before this
+                    # it ran on every finished package, films included.
+                    claim_source = refusals.advertises_block_language(
+                        (grab or {}).get("source_key")
+                    )
                     advertised = (grab or {}).get("title") or package_name
                     delivered_evidence = list(link_details.get("filenames") or [])
                     if package_name and package_name != advertised:
@@ -629,8 +639,12 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                         # the claim itself, and letting the claim vouch for
                         # itself would clear every package on rule 3.
                         delivered_evidence.insert(0, package_name)
-                    contradiction = refusals.language_contradiction(
-                        advertised, delivered_evidence
+                    contradiction = (
+                        refusals.language_contradiction(
+                            advertised, delivered_evidence
+                        )
+                        if claim_source
+                        else None
                     )
                     if contradiction:
                         claimed, delivered = contradiction

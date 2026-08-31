@@ -510,10 +510,14 @@ def waiting_worker(shared_state_dict, shared_state_lock):
                     # ledger and expire; the refusals themselves only get
                     # trimmed when they are far past mattering.
                     try:
-                        from quasarr.identity import refusals
+                        from quasarr.identity import first_seen, refusals
 
                         refusals.prune_grabs()
                         refusals.prune()
+                        # Publication anchors age out only when a release has
+                        # stopped being offered - an active one is touched on
+                        # every poll.
+                        first_seen.prune()
                     except Exception as e:
                         debug(f"Refusal housekeeping skipped: {e}")
             except Exception as e:

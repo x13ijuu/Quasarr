@@ -26,6 +26,7 @@ from quasarr.providers import shared_state
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
 from quasarr.providers.imdb_metadata import get_localized_title, get_year
 from quasarr.providers.log import debug, error, info, trace, warn
+from quasarr.identity import first_seen
 from quasarr.providers.sessions.al import fetch_via_requests_session, invalidate_session
 from quasarr.providers.utils import (
     convert_to_mb,
@@ -130,6 +131,12 @@ class Source(AbstractSearchSource):
                     continue
 
                 date_converted = ""
+                # AL states age relatively ("vor 7 Stunden"), so the absolute
+                # timestamp a newznab feed must carry has to be derived from the
+                # current time - and a derived date is a MOVING date. Remember
+                # which kind this is; a derived one gets anchored per release
+                # below, once the title that identifies it is known.
+                date_is_derived = False
                 small_tag = tr.find("small", class_="text-muted")
                 if small_tag:
                     raw_date_str = small_tag.get_text(strip=True)
@@ -137,6 +144,7 @@ class Source(AbstractSearchSource):
                         dt = _parse_relative_date(raw_date_str)
                         if dt:
                             date_converted = dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
+                            date_is_derived = True
                     else:
                         try:
                             date_converted = _convert_to_rss_date(raw_date_str)
@@ -154,6 +162,19 @@ class Source(AbstractSearchSource):
 
                     # Build payload using final_title
                     mb = 0  # size not available in feed
+
+                    # Hold the date still. Without this the same release is
+                    # offered with a new pubDate on every poll, and Sonarr's
+                    # blocklist - which matches usenet releases on publication
+                    # date - can never recognise what it just blocklisted.
+                    # Measured 2026-08-31: One Piece E1176, 29 grabs in seven
+                    # hours, 29 blocklist rows, not one of them ever matched.
+                    release_date = date_converted
+                    if date_is_derived and date_converted:
+                        release_date = first_seen.anchor(
+                            self.initials, url, final_title, date_converted
+                        )
+
                     link = generate_download_link(
                         shared_state,
                         final_title,
@@ -174,7 +195,7 @@ class Source(AbstractSearchSource):
                                     "imdb_id": None,
                                     "link": link,
                                     "size": mb * 1024 * 1024,
-                                    "date": date_converted,
+                                    "date": release_date,
                                     "source": url,
                                 },
                                 "type": "protected",
@@ -435,6 +456,7 @@ class Source(AbstractSearchSource):
 
                     # Parse date
                     date_td = tab.select_one("tr:has(th>i.fa-calendar-alt) td.modified")
+                    date_is_derived = False
                     if date_td:
                         raw_date = date_td.get_text(strip=True)
                         try:
@@ -443,9 +465,14 @@ class Source(AbstractSearchSource):
                         except Exception:
                             date_str = ""
                     else:
+                        # No date on the page at all. "An hour ago" is a guess,
+                        # and a guess made against the clock moves on every
+                        # search - the same defect the feed path had. Anchor it
+                        # per release below so it is guessed exactly once.
                         date_str = (datetime.utcnow() - timedelta(hours=1)).strftime(
                             "%a, %d %b %Y %H:%M:%S +0000"
                         )
+                        date_is_derived = True
 
                     # Parse filesize from the <tr> with <i class="fa-hdd">
                     size_td = tab.select_one("tr:has(th>i.fa-hdd) td")
@@ -530,6 +557,13 @@ class Source(AbstractSearchSource):
                         self.initials,
                     )
 
+                    release_source = f"{url}#download_{release_id}"
+                    release_date = date_str
+                    if date_is_derived and date_str:
+                        release_date = first_seen.anchor(
+                            self.initials, release_source, release_title, date_str
+                        )
+
                     releases.append(
                         {
                             "details": {
@@ -538,8 +572,8 @@ class Source(AbstractSearchSource):
                                 "imdb_id": imdb_id,
                                 "link": link,
                                 "size": mb * 1024 * 1024,
-                                "date": date_str,
-                                "source": f"{url}#download_{release_id}",
+                                "date": release_date,
+                                "source": release_source,
                             },
                             "type": "protected",
                         }

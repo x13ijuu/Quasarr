@@ -68,12 +68,16 @@ ONE_PIECE = [_ep(21, n, 1000 + n, 1000 + n) for n in range(1, 200)]
 
 
 class _FakeClient:
-    def __init__(self, episodes):
+    def __init__(self, episodes, series_type="anime"):
         self._episodes = episodes
+        self._series_type = series_type
         self.episode_calls = 0
 
     def series_list(self):
-        return [{"imdbId": IMDB, "id": 22}]
+        # Both fixtures below are anime in Sonarr, and absolute numbering only
+        # reaches this resolver for anime at all — so the record has to carry
+        # the type the real one does.
+        return [{"imdbId": IMDB, "id": 22, "seriesType": self._series_type}]
 
     def episodes(self, _series_id, season=None):
         self.episode_calls += 1
@@ -82,13 +86,36 @@ class _FakeClient:
         return [e for e in self._episodes if e["seasonNumber"] == season]
 
 
-def _resolve(episodes, number, func=resolve_absolute_candidates):
-    client = _FakeClient(episodes)
+def _resolve(episodes, number, func=resolve_absolute_candidates, series_type="anime"):
+    client = _FakeClient(episodes, series_type=series_type)
     with patch("quasarr.providers.sonarr_api.get_client", return_value=client):
         return func(SimpleNamespace(values={}), IMDB, number)
 
 
 class AbsoluteCandidateResolutionTests(unittest.TestCase):
+    def test_an_ordinary_series_gets_no_candidates(self):
+        """Absolute numbering is an anime concept — a standard series is left alone.
+
+        Without this guard the candidate list reached the shared matcher for a
+        series that never asked for it, which is the one way anime handling can
+        decide an ordinary search.
+        """
+        self.assertEqual(
+            [],
+            _resolve(SLIME, 17, series_type="standard"),
+            "a standard series must not be given absolute candidates",
+        )
+
+    def test_an_ordinary_series_costs_no_episode_call(self):
+        client = _FakeClient(SLIME, series_type="standard")
+        with patch("quasarr.providers.sonarr_api.get_client", return_value=client):
+            resolve_absolute_candidates(SimpleNamespace(values={}), IMDB, 17)
+        self.assertEqual(
+            0,
+            client.episode_calls,
+            "the type is known from the series list; no episode call is justified",
+        )
+
     def test_scene_absolute_yields_every_season_newest_first(self):
         self.assertEqual(
             [(4, 17), (3, 17), (2, 17), (1, 17)],

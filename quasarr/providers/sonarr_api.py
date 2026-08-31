@@ -298,11 +298,27 @@ def translate_scene_numbering(season, episode, season_episodes, all_episodes):
     return None
 
 
+def is_anime(series_record):
+    """Is this Sonarr series record an anime?
+
+    The scene-numbering collapse this module translates is a property of
+    TheXEM's anime mappings. Reading the type keeps anime handling off the path
+    of an ordinary series instead of relying on the translation to no-op there.
+    """
+    return str((series_record or {}).get("seriesType") or "").lower() == "anime"
+
+
 def resolve_scene_numbering(shared_state, imdb_id, season, episode):
     """Translate a scene-numbered search request via Sonarr's own episode data.
 
     Returns (season, episode) when a translation applies, else None. Fail-open:
     any missing client/series/episode data leaves the request unchanged.
+
+    Anime only. The translation used to run on EVERY tv search and only decline
+    later, which cost two Sonarr round trips against the 95s fan-out deadline
+    for every ordinary series - and left its rewrite branch reachable for one,
+    because that branch fires whenever a requested pair is missing from its
+    season, which also happens on plain metadata lag.
     """
     if not imdb_id or season is None or episode is None:
         return None
@@ -316,6 +332,12 @@ def resolve_scene_numbering(shared_state, imdb_id, season, episode):
         series_id = None
         for series in client.series_list():
             if series.get("imdbId") == wanted_imdb:
+                if not is_anime(series):
+                    trace(
+                        f"scene numbering skipped for {wanted_imdb}: "
+                        "not an anime series"
+                    )
+                    return None
                 series_id = series.get("id")
                 break
         if series_id is None:
@@ -396,6 +418,18 @@ def resolve_absolute_candidates(shared_state, imdb_id, absolute_episode):
         series_id = None
         for series in client.series_list():
             if series.get("imdbId") == wanted_imdb:
+                if not is_anime(series):
+                    # Absolute numbering, TheXEM scene mappings and the
+                    # candidate-pair machinery downstream are anime concepts.
+                    # An ordinary series reaching here means the request was
+                    # malformed, not that it needs translating - and handing a
+                    # candidate list to the shared matcher for one would let
+                    # anime handling decide a search it has no business in.
+                    trace(
+                        f"absolute candidates skipped for {wanted_imdb}: "
+                        "not an anime series"
+                    )
+                    return []
                 series_id = series.get("id")
                 break
         if series_id is None:
