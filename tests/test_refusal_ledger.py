@@ -285,15 +285,15 @@ class RefusalStoreTests(unittest.TestCase):
         self.assertEqual(1, refusals.prune_grabs(now=later))
         self.assertIsNone(refusals.recall_grab("old"))
         self.assertTrue(
-            refusals.is_refused("al", "u"),
+            refusals.is_refused("al", "u", "t"),
             "scaffolding expires, the verdict does not",
         )
 
     def test_refusal_can_be_lifted(self):
         refusals.record_refusal("al", "u", "t", {"German"}, {"Japanese"})
-        self.assertTrue(refusals.is_refused("al", "u"))
-        refusals.delete_refusal("al", "u")
-        self.assertFalse(refusals.is_refused("al", "u"))
+        self.assertTrue(refusals.is_refused("al", "u", "t"))
+        refusals.delete_refusal("al", "u", "t")
+        self.assertFalse(refusals.is_refused("al", "u", "t"))
 
     def test_broken_store_fails_open(self):
         # A search must never return zero because bookkeeping is unhappy.
@@ -308,7 +308,7 @@ class RefusalStoreTests(unittest.TestCase):
         )
         blob = json.loads(
             DataBase("refusals").retrieve(
-                refusals.refusal_key("al", "https://al.invalid/x")
+                refusals.refusal_key("al", "https://al.invalid/x", SLIME_CLAIM)
             )
         )
         self.assertEqual(["German"], blob["claimed"])

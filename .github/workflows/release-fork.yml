@@ -53,10 +53,10 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: Run pytest
+      - name: Run tests
         run: |
           uv sync
-          uv run --with pytest pytest tests/ -q
+          uv run python -X utf8 -m unittest discover -s tests
 
   build-wheel:
     name: Build Wheel
