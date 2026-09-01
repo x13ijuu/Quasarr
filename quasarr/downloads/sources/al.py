@@ -30,7 +30,7 @@ from quasarr.downloads.sources.helpers.anime_title import (
 from quasarr.downloads.sources.helpers.anime_title import (
     subtitle_tokens as _shared_subtitle_tokens,
 )
-from quasarr.identity.refusals import audio_languages, record_unresolvable
+from quasarr.identity.refusals import audio_languages
 from quasarr.providers.cloudflare import (
     flaresolverr_create_session,
     flaresolverr_destroy_session,
@@ -109,27 +109,16 @@ class Source(AbstractDownloadSource):
             else:
                 selection = "cnl"
 
-            # The title as the client grabbed it, before _check_release may
-            # correct it. This is the spelling the search result carries, so it
-            # is the one a refusal has to be filed under to match next time.
-            advertised_title = title
-
             title, release_id = _check_release(
                 shared_state, details_html, release_id, title, episode_in_title
             )
             if release_id == 0:
+                # Returning empty leaves source_result unset in download(), which
+                # funnels into the single "could not resolve" branch there — and
+                # that is where the release is held back with a backoff, for
+                # every source rather than just this one. maja.39 recorded the
+                # refusal here instead, which is why it never covered scnlog.me.
                 info(f"No valid release ID found for {title} - Download failed!")
-                # Every "cannot resolve" path in _check_release funnels through
-                # this zero: no tab carries the title, none carries the
-                # advertised audio, the page moved on. Up to maja.38 it stopped
-                # at the log line above, so the next feed offered the release
-                # again and the client grabbed it again — 29 times in seven
-                # hours for One Piece E1176 on 2026-08-31. Hold it back with a
-                # backoff instead; if the release simply was not posted yet, it
-                # comes back on its own.
-                record_unresolvable(
-                    Source.initials, url, advertised_title, "no matching release on page"
-                )
                 return {}
 
             anime_identifier = url.rstrip("/").split("/")[-1]
