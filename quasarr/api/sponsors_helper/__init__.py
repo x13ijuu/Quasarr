@@ -92,10 +92,6 @@ def is_rapidgator_link(link):
     return "rapidgator" in extract_helper_candidate_url(link).lower()
 
 
-def is_he_link(link):
-    return extract_helper_candidate_mirror(link) == "he"
-
-
 def prioritize_helper_supported_links(
     links, supported_url_patterns, supported_mirrors=None
 ):
@@ -134,9 +130,6 @@ def select_helper_package(
         raw_links = data.get("links")
         if not isinstance(raw_links, list) or not raw_links:
             continue
-        if any(is_he_link(link) for link in raw_links):
-            continue
-
         # Order links by the category's mirror-whitelist: the whitelist order is
         # the priority ranking. Without an explicit whitelist, fall back to the
         # legacy rapidgator-first default.

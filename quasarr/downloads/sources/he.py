@@ -2,9 +2,7 @@
 # Quasarr
 # Project by https://github.com/rix1337
 
-import os
 import re
-import tempfile
 import uuid
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
@@ -36,7 +34,7 @@ class Source(AbstractDownloadSource):
         }
 
         # 1. Try Standard Strategy (Fast)
-        result = _strategy_standard(url, headers, shared_state)
+        result = _strategy_standard(url, headers)
 
         # 2. If Standard failed (result is None), switch to FlareSolverr (Robust)
         if result is None or result.get("inconclusive"):
@@ -230,35 +228,6 @@ def _protected_release_result(url, imdb_id):
     }
 
 
-def _save_unparsed_html(shared_state, html_content):
-    if not isinstance(html_content, str):
-        return
-
-    configfile = getattr(shared_state, "values", {}).get("configfile")
-    if not configfile:
-        return
-
-    try:
-        config_path = os.path.dirname(configfile)
-        filename = os.path.join(config_path, "HE_unparsed.html")
-        file_descriptor, temporary_filename = tempfile.mkstemp(
-            prefix=".HE_unparsed_", suffix=".html", dir=config_path, text=True
-        )
-        try:
-            with os.fdopen(file_descriptor, "w", encoding="utf-8") as output:
-                output.write(html_content)
-            os.replace(temporary_filename, filename)
-        except BaseException:
-            try:
-                os.remove(temporary_filename)
-            except OSError:
-                pass
-            raise
-        info(f'Could not parse HE page HTML. Saved latest copy to "{filename}".')
-    except OSError as e:
-        warn(f"Could not save unparsed HE page HTML: {e}")
-
-
 def _parse_links_strict(html):
     """
     Parses links specifically from the content-protector-access-form div
@@ -300,7 +269,7 @@ def _parse_links_strict(html):
     return valid_links
 
 
-def _strategy_standard(url, headers, shared_state=None):
+def _strategy_standard(url, headers):
     """
     Fast Path: Uses standard requests.
     Returns dict {'links': [], 'imdb_id': ...} if successful,
@@ -341,8 +310,6 @@ def _strategy_standard(url, headers, shared_state=None):
         )
         if not found_form:
             debug("Standard: No form found.")
-            if shared_state:
-                _save_unparsed_html(shared_state, r.text)
             # If no form and no links, we might just return empty links but valid IMDB if found
             if imdb_id:
                 return {"links": [], "imdb_id": imdb_id}
@@ -378,8 +345,6 @@ def _strategy_standard(url, headers, shared_state=None):
             return _protected_release_result(clean_url, imdb_id)
 
         debug("Standard: POST succeeded but returned no links. Trying FlareSolverr.")
-        if shared_state:
-            _save_unparsed_html(shared_state, r_post.text)
         return {"links": [], "imdb_id": imdb_id, "inconclusive": True}
 
     except Exception as e:
@@ -446,7 +411,6 @@ def _strategy_flaresolverr_loop(shared_state, url):
             )
 
             if not found_form:
-                _save_unparsed_html(shared_state, current_html)
                 if submitted_form:
                     warn(
                         "FlareSolverr: No links found after form submission; CAPTCHA assumed."
@@ -480,7 +444,6 @@ def _strategy_flaresolverr_loop(shared_state, url):
                 continue
 
         if submitted_form:
-            _save_unparsed_html(shared_state, current_html)
             warn(
                 "FlareSolverr: No links found after form submission attempts; CAPTCHA assumed."
             )
