@@ -16,6 +16,7 @@ from quasarr.downloads.linkcrypters.hide import decrypt_links_if_hide
 from quasarr.downloads.mirror_filters import filter_final_download_urls
 from quasarr.downloads.packages import get_packages
 from quasarr.downloads.sources import get_sources as get_download_sources
+from quasarr.identity.refusals import record_unresolvable
 from quasarr.providers.host_bans import (
     HostBannedError,
     is_banned,
@@ -802,6 +803,27 @@ def download(
             }
 
         if source_result is None:
+            # Every "cannot resolve" path in every source funnels through here:
+            # no source claimed the URL, the claiming source came back empty, or
+            # the page moved on. Up to maja.39 this only failed the grab, so the
+            # next feed offered the release again and the client grabbed it
+            # again — 29 times in seven hours for One Piece E1176 on 2026-08-31.
+            #
+            # maja.39 recorded the refusal, but it hooked the AL source instead
+            # of this funnel, so it only ever covered one of 22 sources. Found on
+            # 2026-08-31 on Mayans M.C. S05: the identical failure against
+            # scnlog.me, entirely unguarded. Recording it HERE is what makes the
+            # backstop match the failure.
+            #
+            # Soft, with a backoff: "not resolvable" is usually temporary at any
+            # source, so the release comes back on its own instead of being
+            # banned.
+            record_unresolvable(
+                normalized_source_key or detected_source_key,
+                url,
+                title,
+                "no source could resolve this release",
+            )
             result = fail(
                 title,
                 package_id,

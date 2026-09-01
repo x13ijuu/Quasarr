@@ -26,6 +26,7 @@ uses — hermetic, no network, no JDownloader.
 """
 import os
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -100,13 +101,20 @@ class _StateBackedTest(unittest.TestCase):
         config_path = os.path.join(self.tmp.name, "Quasarr.ini")
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write("[Hostnames]\nal = " + HOST + "\n")
+        from quasarr.storage.sqlite_database import DataBase
+
         shared_state_module.values = {
             "dbfile": os.path.join(self.tmp.name, "Quasarr.db"),
             "configfile": config_path,
             "config": lambda _section: {"al": HOST},
             "internal_address": "http://quasarr.invalid:8080",
+            # Needed once a test drives the real download() funnel rather than
+            # calling the ledger directly: StatsHelper resolves tables through
+            # values["database"], and the source getters read the user agent.
+            "database": lambda table: DataBase(table),
+            "user_agent": "Quasarr-Test/1.0",
         }
-        shared_state_module.lock = None
+        shared_state_module.lock = threading.Lock()
 
     def tearDown(self):
         shared_state_module.values = self._old_values
@@ -252,6 +260,108 @@ class UnresolvableReleaseIsHeldBackTests(_StateBackedTest):
             [self._search_result()], now=refusals.SOFT_BACKOFF_S[-1] * 10
         )
         self.assertEqual([], offered, "and it must still hold long after any backoff")
+
+
+class TheBackstopIsWiredForEverySourceTests(_StateBackedTest):
+    """The test that was missing, and the reason a whole class of loop survived.
+
+    maja.39 recorded the refusal inside the AL download source. The suite it came
+    with called ``record_unresolvable`` directly, so it proved the ledger works
+    and never once proved the ledger is REACHED. It therefore stayed green while
+    21 of 22 sources had no backstop at all.
+
+    Found on 2026-08-31 on Mayans M.C. S05: ``Could not find matching source``
+    against scnlog.me — the identical failure One Piece looped on, entirely
+    unguarded, on a perfectly ordinary series.
+
+    These tests go through the real ``download()`` funnel instead. A test that
+    only exercises the case you already know confirms your assumption; it does
+    not check it.
+    """
+
+    class _EmptySource:
+        """A source that finds nothing — the shape of every "cannot resolve".
+
+        Stubbed rather than reached over the network: the point of these tests is
+        the funnel in download(), not the scraping. Returning {} is exactly what
+        the real sources do when a page no longer carries the release.
+        """
+
+        @staticmethod
+        def get_download_links(shared_state, url, mirrors, title, password):
+            return {}
+
+    def _download(self, url, title, source_key):
+        import quasarr.downloads as downloads
+
+        # find_existing_package reaches JDownloader over the MyJD cloud API;
+        # "not a duplicate" is the precondition here, not the subject.
+        with patch.object(
+            downloads,
+            "get_download_sources",
+            return_value={source_key: self._EmptySource()},
+        ), patch.object(downloads, "find_existing_package", return_value=None):
+            return downloads.download(
+                shared_state_module,
+                request_from="Sonarr/4.0",
+                download_category="tv",
+                title=title,
+                url=url,
+                size_mb=0,
+                password="",
+                imdb_id=None,
+                source_key=source_key,
+            )
+
+    def test_a_failed_grab_from_a_non_al_source_is_held_back(self):
+        url = "https://sl.invalid/foreign/synthetic-show-s05e10"
+        title = "Synthetic.Show.S05E10.GERMAN.DL.1080P.WEB.H264-SYN"
+
+        result = self._download(url, title, "sl")
+        self.assertTrue(result.get("failed"), "the grab must still fail")
+
+        offered, dropped = refusals.filter_refused(
+            [
+                {
+                    "details": {
+                        "title": title,
+                        "hostname": "sl",
+                        "source": url,
+                        "link": "http://quasarr.invalid/download/?payload=x",
+                    },
+                    "type": "protected",
+                }
+            ]
+        )
+        self.assertEqual(
+            [], offered,
+            "a release no source could resolve must not be offered again — "
+            "and that has to hold for every source, not just AL",
+        )
+        self.assertEqual(1, len(dropped))
+
+    def test_the_hold_is_soft_so_the_release_returns(self):
+        url = "https://sl.invalid/foreign/synthetic-show-s05e11"
+        title = "Synthetic.Show.S05E11.GERMAN.DL.1080P.WEB.H264-SYN"
+        self._download(url, title, "sl")
+
+        blob = refusals.all_refusals()[refusals.refusal_key("sl", url, title)]
+        self.assertEqual(refusals.KIND_SOFT, blob["kind"])
+        self.assertTrue(blob["expires_at"] > blob["created_at"])
+
+    def test_the_refusal_is_filed_under_the_source_that_was_asked(self):
+        # The key must line up with what the SEARCH side later presents, or the
+        # filter looks up something that is never there — a backstop that writes
+        # to one address and reads from another is no backstop.
+        url = "https://sl.invalid/foreign/synthetic-show-s05e12"
+        title = "Synthetic.Show.S05E12.GERMAN.DL.1080P.WEB.H264-SYN"
+        self._download(url, title, "sl")
+
+        self.assertIn(
+            refusals.refusal_key("sl", url, title),
+            refusals.all_refusals(),
+            "search results carry hostname=sl, so the refusal must too",
+        )
 
 
 class AnimeHandlingStaysOffOrdinarySeriesTests(unittest.TestCase):
