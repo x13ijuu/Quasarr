@@ -104,10 +104,6 @@ class Source(AbstractDownloadSource):
                 return {}
 
             episode_in_title = _extract_episode(title)
-            if episode_in_title:
-                selection = episode_in_title - 1  # Convert to zero-based index
-            else:
-                selection = "cnl"
 
             title, release_id = _check_release(
                 shared_state, details_html, release_id, title, episode_in_title
@@ -120,6 +116,13 @@ class Source(AbstractDownloadSource):
                 # refusal here instead, which is why it never covered scnlog.me.
                 info(f"No valid release ID found for {title} - Download failed!")
                 return {}
+
+            if episode_in_title:
+                selection = _resolve_episode_selection(
+                    details_html, release_id, episode_in_title
+                )
+            else:
+                selection = "cnl"
 
             anime_identifier = url.rstrip("/").split("/")[-1]
 
@@ -777,10 +780,48 @@ def _parse_info_from_download_item(
             total_episodes = len(episode_links)
             if total_episodes > 0:
                 ep = int(requested_episode)
+<<<<<<< HEAD
                 # Membership, not count: the link for this episode must EXIST.
                 # `ep <= total_episodes` was off by one (see _tab_offers_episode)
                 # and silently dropped every release for high absolute numbers.
                 if _tab_offers_episode(tab, ep):
+=======
+
+                # Parse actual episode range from row labels
+                # Labels look like "003 Episode 080-081: Title" or "001 Episode 001: Title"
+                parsed_min = None
+                parsed_max = None
+                for row in episode_links:
+                    match = re.match(
+                        r"\d+\s+Episode\s+(\d+)(?:\s*-\s*(\d+))?(?=\s*:|\s*$)",
+                        row.get_text(" ", strip=True),
+                    )
+                    if match:
+                        first = int(match.group(1))
+                        last = int(match.group(2)) if match.group(2) else first
+                        if parsed_min is None or first < parsed_min:
+                            parsed_min = first
+                        if parsed_max is None or last > parsed_max:
+                            parsed_max = last
+
+                # Use parsed range if available, otherwise fall back to count-based
+                if parsed_min is not None and parsed_max is not None:
+                    # Check if requested episode is within the actual range
+                    if parsed_min <= ep <= parsed_max:
+                        episode_min = parsed_min
+                        episode_max = parsed_max
+                        if release_title:
+                            release_title = re.sub(
+                                r"(?<=\.)S(\d{1,4})(?=\.)",
+                                lambda m: f"S{int(m.group(1)):02d}E{ep:02d}",
+                                release_title,
+                                count=1,
+                                flags=re.IGNORECASE,
+                            )
+                    # else: leave episode_min/max as None → search will skip this release
+                elif ep <= total_episodes:
+                    # Fallback: no parseable labels, use count-based logic
+>>>>>>> v.4.6.20
                     episode_min = 1
                     episode_max = total_episodes
                     if release_title:
@@ -1237,6 +1278,7 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
     return title, release_id
 
 
+<<<<<<< HEAD
 def notes_title_identifies_episode(notes_title, episode) -> bool:
     """True when a release-notes title names the episode that was requested.
 
@@ -1255,6 +1297,44 @@ def notes_title_identifies_episode(notes_title, episode) -> bool:
     except (TypeError, ValueError):
         return True
     return _extract_episode(notes_title or "") == wanted
+=======
+def _resolve_episode_selection(details_html, release_id, episode: int) -> int:
+    """
+    Map a requested episode number to the zero-based row index (data-loop) of a release.
+
+    Rows are labeled like "Episode 003" or "Episode 001-002" (merged double episodes),
+    so the row position does not always equal episode - 1. Falls back to that position
+    when no row label covers the requested episode.
+    """
+    fallback = episode - 1
+    soup = BeautifulSoup(details_html, "html.parser")
+    tab = soup.find("div", class_="tab-pane", id=f"download_{release_id}")
+    episodes_div = tab.find("div", class_="episodes") if tab else None
+    if not episodes_div:
+        return fallback
+
+    for row in episodes_div.find_all("a", attrs={"data-loop": re.compile(r"^\d+$")}):
+        # Label directly follows the row number, e.g. "003 Episode 001-002: Title".
+        # Anchored so episode titles like "Chikara - Episode 1" are not mistaken for it.
+        match = re.match(
+            r"\d+\s+Episode\s+(\d+)(?:\s*-\s*(\d+))?(?=\s*:|\s*$)",
+            row.get_text(" ", strip=True),
+        )
+        if not match:
+            continue
+        first = int(match.group(1))
+        last = int(match.group(2)) if match.group(2) else first
+        if first <= episode <= last:
+            selection = int(row["data-loop"])
+            if selection != fallback:
+                info(
+                    f"Episode {episode} is row {selection + 1} of release {release_id} "
+                    f'("{match.group(0)}"), not row {episode}'
+                )
+            return selection
+
+    return fallback
+>>>>>>> v.4.6.20
 
 
 def _extract_episode(title: str) -> int | None:
