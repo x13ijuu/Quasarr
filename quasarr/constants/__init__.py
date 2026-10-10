@@ -132,7 +132,7 @@ SESSION_REQUEST_TIMEOUT_SECONDS = int(
 SEARCH_FANOUT_DEADLINE_SECONDS = int(os.environ.get("SEARCH_FANOUT_DEADLINE", "60"))
 
 # Notification providers exposed in config/UI.
-NOTIFICATION_PROVIDERS = ("discord", "telegram")
+NOTIFICATION_PROVIDERS = ("discord", "telegram", "pushover")
 
 
 # ==============================================================================
