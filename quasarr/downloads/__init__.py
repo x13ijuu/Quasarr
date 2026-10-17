@@ -50,13 +50,14 @@ from quasarr.storage.categories import (
 
 
 def generate_deterministic_package_id(
-    title, source_key, client_type, download_category, nonce=None
+    title, source_key, client_type, download_category, identity=None, nonce=None
 ):
     """
     Generate a package ID from title, source, and client type.
 
-    Without a nonce the ID is DETERMINISTIC — the same (title, source_key,
-    client_type) always yields the same ID (used for internal lookups/tests).
+    Without a nonce the ID is DETERMINISTIC — the same title, source, client,
+    category, and optional source identity always yield the same ID (used for
+    internal lookups/tests, and upstream's blocklist semantics).
 
     With a nonce it is UNIQUE per grab (Maja fork). This is required for the
     SABnzbd contract: real SAB mints a fresh nzo_id on every add, and Sonarr keys
@@ -66,11 +67,17 @@ def generate_deterministic_package_id(
     as already-handled and never tracked/imported (proven: E137 2026-07-08). So the
     live grab path (enqueue_grab) always passes a per-grab nonce.
 
+    The source identity (upstream 4.7.3, e.g. WX release UID + SxxEyy) keeps two
+    grabs of the same title for DIFFERENT episodes apart; the nonce still makes
+    every grab attempt unique on top of it.
+
     Args:
         title: Release title (e.g., "Movie.Name.2024.1080p.BluRay")
         source_key: Source identifier/hostname shorthand
         client_type: Client type without version (e.g., "radarr", "sonarr")
         download_category: Optional download category override
+            (e.g., "movies", "tv", "docs")
+        identity: Optional stable source identity; omitted for legacy releases
         nonce: Optional per-grab uniqueness token. When set, the id is unique.
 
     Returns:
@@ -90,8 +97,12 @@ def generate_deterministic_package_id(
             normalized_client, "tv"
         )
 
-    # Create hash from combination using SHA256 (+ optional per-grab nonce)
+    # Create hash from combination using SHA256 (+ optional source identity,
+    # + optional per-grab nonce)
+    normalized_identity = str(identity).strip() if identity else ""
     hash_input = f"{normalized_title}|{normalized_source}|{normalized_client}"
+    if normalized_identity:
+        hash_input += f"|{normalized_identity}"
     if nonce is not None:
         hash_input = f"{hash_input}|{nonce}"
     hash_bytes = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
@@ -290,7 +301,13 @@ def handle_auto_decrypt_links(shared_state, links, title, password, package_id):
     result = decrypt_links_if_hide(shared_state, links)
 
     if result.get("status") != "success":
-        return {"success": False, "reason": "Auto-decrypt failed"}
+        failure = {
+            "success": False,
+            "reason": result.get("reason") or "Auto-decrypt failed",
+        }
+        if result.get("terminal"):
+            failure["terminal"] = True
+        return failure
 
     decrypted_urls = result.get("results", [])
     if not decrypted_urls:
@@ -369,6 +386,9 @@ def process_links(
     imdb_id = imdb_id or source_result.get("imdb_id")
     title = normalize_download_title(source_result.get("title") or title)
 
+    if source_result.get("terminal") and source_result.get("error"):
+        return fail(title, package_id, shared_state, reason=source_result["error"])
+
     if not links:
         return fail(
             title,
@@ -444,6 +464,8 @@ def process_links(
             return {"success": True, "title": title}
         if result.get("persisted_failure"):
             return {"success": True, "title": title, "failed": True}
+        if result.get("terminal"):
+            return fail(title, package_id, shared_state, reason=result.get("reason"))
         info(f"Auto-decrypt failed for {title}, falling back to manual CAPTCHA...")
         classified["protected"].extend(classified["auto"])
 
@@ -660,6 +682,10 @@ def download(
         source_key: Hostname shorthand from search. If not provided,
                     will be derived from URL matching against configured hostnames.
     """
+    # Upstream resets package_id to None here. The fork must NOT: the worker
+    # passes the pre-minted per-grab id in, and it must survive verbatim.
+    package_identity = None
+    package_identity_source_key = None
     try:
         if imdb_id and imdb_id.lower() == "none":
             imdb_id = None
@@ -717,12 +743,28 @@ def download(
             ):
                 continue
 
+            if package_identity is None:
+                identity_getter = getattr(source, "get_package_identity", None)
+                if identity_getter:
+                    try:
+                        candidate_identity = identity_getter(url)
+                    except Exception:
+                        candidate_identity = None
+                    if (
+                        isinstance(candidate_identity, str)
+                        and candidate_identity.strip()
+                    ):
+                        package_identity = candidate_identity
+                        package_identity_source_key = key
+
             try:
                 # Mirrors are download-category-driven and passed to each source getter.
                 candidate_result = source.get_download_links(
                     shared_state, url, mirrors, title, password
                 )
-                if candidate_result and candidate_result.get("links"):
+                if candidate_result and (
+                    candidate_result.get("links") or candidate_result.get("terminal")
+                ):
                     clear_hostname_issue(key)
                     source_result = candidate_result
                     label = key.upper()
@@ -761,11 +803,17 @@ def download(
 
         # Use provided source_key if available, otherwise use detected one
         # This ensures we use the authoritative source from the search results
-        final_source_key = source_key if source_key else detected_source_key
+        final_source_key = (
+            source_key or detected_source_key or package_identity_source_key
+        )
 
         # Use the pre-minted per-grab id (worker path) or generate one (direct call)
         package_id = package_id or generate_deterministic_package_id(
-            title, final_source_key, client_type, download_category
+            title,
+            final_source_key,
+            client_type,
+            download_category,
+            identity=package_identity,
         )
 
         # Maja fork: note who this grab belongs to. When the package finishes, the
@@ -853,10 +901,14 @@ def download(
             except Exception:
                 client_type = "unknown"
 
-            final_source_key = source_key if source_key else "unknown"
+            final_source_key = source_key or package_identity_source_key or "unknown"
 
             package_id = package_id or generate_deterministic_package_id(
-                title, final_source_key, client_type, download_category
+                title,
+                final_source_key,
+                client_type,
+                download_category,
+                identity=package_identity,
             )
 
         result = fail(title, package_id, shared_state, reason=f"Unexpected error: {e}")

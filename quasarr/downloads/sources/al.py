@@ -104,10 +104,6 @@ class Source(AbstractDownloadSource):
                 return {}
 
             episode_in_title = _extract_episode(title)
-            if episode_in_title:
-                selection = episode_in_title - 1  # Convert to zero-based index
-            else:
-                selection = "cnl"
 
             title, release_id = _check_release(
                 shared_state, details_html, release_id, title, episode_in_title
@@ -120,6 +116,13 @@ class Source(AbstractDownloadSource):
                 # refusal here instead, which is why it never covered scnlog.me.
                 info(f"No valid release ID found for {title} - Download failed!")
                 return {}
+
+            if episode_in_title:
+                selection = _resolve_episode_selection(
+                    details_html, release_id, episode_in_title
+                )
+            else:
+                selection = "cnl"
 
             anime_identifier = url.rstrip("/").split("/")[-1]
 
@@ -780,9 +783,16 @@ def _parse_info_from_download_item(
                 # Membership, not count: the link for this episode must EXIST.
                 # `ep <= total_episodes` was off by one (see _tab_offers_episode)
                 # and silently dropped every release for high absolute numbers.
+                # Since 4.7.3 the check reads the row labels first (upstream
+                # #453), so a release covering E080-120 no longer passes for E30.
                 if _tab_offers_episode(tab, ep):
-                    episode_min = 1
-                    episode_max = total_episodes
+                    ranges = _episode_row_ranges(tab)
+                    if ranges:
+                        episode_min = min(first for first, _ in ranges)
+                        episode_max = max(last for _, last in ranges)
+                    else:
+                        episode_min = 1
+                        episode_max = total_episodes
                     if release_title:
                         release_title = re.sub(
                             r"(?<=\.)S(\d{1,4})(?=\.)",
@@ -970,9 +980,46 @@ def _tab_offers_episode(tab, episode):
     if loops is None:
         return None  # tab has no per-episode list — caller decides
     try:
-        return (int(episode) - 1) in loops
+        ep = int(episode)
     except (TypeError, ValueError):
         return None
+    # Row labels first (upstream 4.7.3, #449/#453): a row says which episodes it
+    # holds ("003 Episode 080-081: Title"). Position arithmetic is wrong for a
+    # release that does not start at episode 1 - one covering E080-120 offers
+    # loops 0..40, so E30 would "exist" at loop 29 and fetch E109 - and for
+    # merged double episodes. Only when the rows carry no usable label does the
+    # 0-based arithmetic below decide, exactly as before.
+    ranges = _episode_row_ranges(tab)
+    if ranges and any(first <= ep <= last for first, last in ranges):
+        return True
+    if ranges and len(ranges) == len(loops):
+        return False  # every row is labeled and none holds the episode
+    return (ep - 1) in loops
+
+
+# Row label right after the row number, e.g. "003 Episode 001-002: Title".
+# Anchored so episode titles like "Chikara - Episode 1" are not mistaken for it
+# (same pattern as upstream's _resolve_episode_selection).
+_EPISODE_ROW_LABEL = re.compile(r"\d+\s+Episode\s+(\d+)(?:\s*-\s*(\d+))?(?=\s*:|\s*$)")
+
+
+def _episode_row_ranges(tab):
+    """(first, last) episode numbers of every labeled row in this tab.
+
+    Empty when no row carries a parseable label, None when the tab has no
+    per-episode list at all.
+    """
+    episodes_div = tab.find("div", class_="episodes")
+    if not episodes_div:
+        return None
+    ranges = []
+    for row in episodes_div.find_all("a", attrs={"data-loop": re.compile(r"^\d+$")}):
+        match = _EPISODE_ROW_LABEL.match(row.get_text(" ", strip=True))
+        if match:
+            first = int(match.group(1))
+            last = int(match.group(2)) if match.group(2) else first
+            ranges.append((first, last))
+    return ranges
 
 
 def _episode_link_count(tab):
@@ -1137,9 +1184,10 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
     # it silently resolves to the first link of a main-season tab - the Solo
     # Leveling case, which maja.25 documented but did not prevent.
     #
-    # We cannot translate an out-of-range index without knowing the tab's own
-    # episode offset, and that offset is not stated anywhere in the markup. So
-    # refuse rather than fetch an arbitrary link.
+    # Since 4.7.3 the index comes from the row labels where they exist
+    # (_resolve_episode_selection), and _tab_offers_episode reads the same
+    # labels. Without a usable label we still cannot know the tab's own episode
+    # offset, so refuse rather than fetch an arbitrary link.
     if tab is not None and episode_in_title:
         # Same correction as on the search side: ask whether the LINK EXISTS,
         # not whether the number fits the count. The count version refused
@@ -1255,6 +1303,44 @@ def notes_title_identifies_episode(notes_title, episode) -> bool:
     except (TypeError, ValueError):
         return True
     return _extract_episode(notes_title or "") == wanted
+
+
+def _resolve_episode_selection(details_html, release_id, episode: int) -> int:
+    """
+    Map a requested episode number to the zero-based row index (data-loop) of a release.
+
+    Rows are labeled like "Episode 003" or "Episode 001-002" (merged double episodes),
+    so the row position does not always equal episode - 1. Falls back to that position
+    when no row label covers the requested episode.
+    """
+    fallback = episode - 1
+    soup = BeautifulSoup(details_html, "html.parser")
+    tab = soup.find("div", class_="tab-pane", id=f"download_{release_id}")
+    episodes_div = tab.find("div", class_="episodes") if tab else None
+    if not episodes_div:
+        return fallback
+
+    for row in episodes_div.find_all("a", attrs={"data-loop": re.compile(r"^\d+$")}):
+        # Label directly follows the row number, e.g. "003 Episode 001-002: Title".
+        # Anchored so episode titles like "Chikara - Episode 1" are not mistaken for it.
+        match = re.match(
+            r"\d+\s+Episode\s+(\d+)(?:\s*-\s*(\d+))?(?=\s*:|\s*$)",
+            row.get_text(" ", strip=True),
+        )
+        if not match:
+            continue
+        first = int(match.group(1))
+        last = int(match.group(2)) if match.group(2) else first
+        if first <= episode <= last:
+            selection = int(row["data-loop"])
+            if selection != fallback:
+                info(
+                    f"Episode {episode} is row {selection + 1} of release {release_id} "
+                    f'("{match.group(0)}"), not row {episode}'
+                )
+            return selection
+
+    return fallback
 
 
 def _extract_episode(title: str) -> int | None:

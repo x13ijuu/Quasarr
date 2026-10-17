@@ -11,8 +11,12 @@ Retries), nicht im Fork.
 
 **Was noch passiert:**
 - Upstream-Rebases über die Auto-Rebase-Pipeline (`.github/workflows/`), damit das Image nicht
-  hinter `rix1337/Quasarr` zurückfällt.
-- Sicherheitsfixes und CI-Pflege.
+  hinter `rix1337/Quasarr` zurückfällt. Konfliktlösungen dürfen Upstream-Verhalten in die
+  Fork-Pfade nachziehen, wenn beide sonst widersprechen (Beispiel `4.7.3-maja.42`: AL-
+  Zeilenbeschriftungen gelten auch für die Fork-Prüfung `_tab_offers_episode`).
+- Sicherheitsfixes, CI-Pflege und Abhängigkeits-Pins, ohne die ein Rebuild bricht.
+
+Aktueller Upstream-Stand: **`4.7.3-maja.42`** (2026-10-17).
 
 **Was nicht mehr passiert:**
 - Verhaltens-Fixes für neue Fehlerformen (Numbering, Sprach-Flags, Regrab-Schleifen, …).
