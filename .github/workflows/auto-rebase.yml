@@ -63,8 +63,28 @@ jobs:
           git config user.email "maja-auto-rebase@users.noreply.github.com"
           git remote add upstream https://github.com/rix1337/Quasarr.git
           git fetch upstream tag "${{ steps.up.outputs.latest }}" --no-tags
-          if git merge --no-ff "${{ steps.up.outputs.latest }}" \
-               -m "merge: upstream ${{ steps.up.outputs.latest }} into maja line (auto-rebase)"; then
+          # Upstream-Workflows gehoeren nicht in den Fork: wir haben sie geloescht,
+          # upstream aendert sie trotzdem weiter. Jede solche Aenderung war ein
+          # modify/delete-Konflikt, und der wip-Branch trug die upstream-Version —
+          # GITHUB_TOKEN darf aber keine Workflow-Dateien pushen ("refusing to allow
+          # a GitHub App to create or update workflow ... without workflows
+          # permission"). Am 2026-10-16/17 scheiterte daran der Push fuer v.4.7.3,
+          # NOCH VOR dem Issue — es gab weder Branch noch Signal ausser dem roten Lauf.
+          # Darum: .github/workflows/ nach jedem Merge exakt auf den Fork-Stand.
+          # Neue upstream-Workflows fliegen raus, geloeschte bleiben geloescht.
+          # Gleicher Block im PR-Schritt unten.
+          keep_fork_workflows() {
+            git rm -r -q -f --ignore-unmatch -- .github/workflows
+            git checkout HEAD -- .github/workflows
+          }
+          git merge --no-ff --no-commit "${{ steps.up.outputs.latest }}" || true
+          git rev-parse -q --verify MERGE_HEAD >/dev/null \
+            || { echo "::error::git merge hat keinen Merge-Zustand hinterlassen."; exit 1; }
+          keep_fork_workflows
+          # Konflikte nur in Workflow-Dateien sind damit aufgeloest — entscheidend
+          # ist, was DANACH noch unmerged ist.
+          if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+            git commit -q -m "merge: upstream ${{ steps.up.outputs.latest }} into maja line (auto-rebase)"
             n="$(grep -oP 'MAJA_PATCH_LEVEL = \K[0-9]+' quasarr/providers/version.py)"
             sed -i "s/^MAJA_PATCH_LEVEL = ${n}$/MAJA_PATCH_LEVEL = $((n+1))/" quasarr/providers/version.py
             git commit -am "chore(fork): maja.$((n+1)) — auto-rebase onto ${{ steps.up.outputs.latest }}"
@@ -82,7 +102,10 @@ jobs:
         id: tests
         if: steps.merge.outputs.state == 'merged'
         continue-on-error: true
-        run: uv run --with pytest python -m pytest tests/ -q
+        # Derselbe Runner wie pr-tests.yml / release-fork.yml (stdlib unittest,
+        # tests/AGENTS.md) — pytest sammelt mehr ein und kann gruen bleiben, wo
+        # das Release-Gate danach rot wird.
+        run: uv run python -X utf8 -m unittest discover -s tests
 
       - name: Push to maja/main (clean merge + green tests)
         if: steps.merge.outputs.state == 'merged' && steps.tests.outcome == 'success'
@@ -151,6 +174,10 @@ jobs:
           git checkout -B "$b"
           if [ "${{ steps.merge.outputs.state }}" = "conflict" ]; then
             git merge "${{ steps.up.outputs.latest }}" || true
+            # Wie im Merge-Schritt: sonst traegt der wip-Commit upstream-Workflows
+            # und der Push unten wird abgelehnt.
+            git rm -r -q -f --ignore-unmatch -- .github/workflows
+            git checkout HEAD -- .github/workflows
             git add -A && git commit -m "wip: auto-rebase ${{ steps.up.outputs.latest }} (KONFLIKTE — manuell lösen)" || true
           fi
           git push -f origin "$b"
