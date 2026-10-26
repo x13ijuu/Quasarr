@@ -641,7 +641,7 @@ def _parse_info_from_download_item(
     Parse a BeautifulSoup 'tab' from a download item into ReleaseInfo.
     """
     # notes
-    notes_td = tab.select_one("tr:has(th>i.fa-info) td")
+    notes_td = tab.select_one("th:has(> i.fa-info) ~ td")
     notes_text = notes_td.get_text(strip=True) if notes_td else ""
     notes_lower = notes_text.lower()
     trace(
@@ -668,7 +668,7 @@ def _parse_info_from_download_item(
                 )
 
     # resolution
-    res_td = tab.select_one("tr:has(th>i.fa-desktop) td")
+    res_td = tab.select_one("th:has(> i.fa-desktop) ~ td")
     resolution = "1080p"
     if res_td:
         match = re.search(r"(\d+)\s*x\s*(\d+)", res_td.get_text(strip=True))
@@ -680,7 +680,7 @@ def _parse_info_from_download_item(
     audio_langs = _tab_audio_languages(tab)
     sub_codes = [
         icon["class"][1].replace("flag-", "")
-        for icon in tab.select("tr:has(th>i.fa-closed-captioning) i.flag")
+        for icon in tab.select("th:has(> i.fa-closed-captioning) ~ td i.flag")
     ]
     subtitle_langs = [
         {"jp": "Japanese", "de": "German", "en": "English"}.get(c, c.title())
@@ -731,7 +731,7 @@ def _parse_info_from_download_item(
         video = "x264"
 
     # release group
-    grp_td = tab.select_one("tr:has(th>i.fa-child) td")
+    grp_td = tab.select_one("th:has(> i.fa-child) ~ td")
     if grp_td:
         grp = grp_td.get_text(strip=True)
         release_group = grp.replace(" ", "").replace("-", "")
@@ -944,7 +944,9 @@ def _tab_audio_languages(tab):
         {"jp": "Japanese", "de": "German", "en": "English"}.get(code, code.title())
         for code in (
             icon["class"][1].replace("flag-", "")
-            for icon in tab.select("tr:has(th>i.fa-volume-up) i.flag")
+            # Same form as upstream 4.7.7: soupsieve 3 rejects complex selectors
+            # inside :has(), so the header cell is matched and its sibling read.
+            for icon in tab.select("th:has(> i.fa-volume-up) ~ td i.flag")
         )
     ]
 
