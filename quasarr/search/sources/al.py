@@ -455,7 +455,9 @@ class Source(AbstractSearchSource):
                     )
 
                     # Parse date
-                    date_td = tab.select_one("tr:has(th>i.fa-calendar-alt) td.modified")
+                    date_td = tab.select_one(
+                        "th:has(> i.fa-calendar-alt) ~ td.modified"
+                    )
                     date_is_derived = False
                     if date_td:
                         raw_date = date_td.get_text(strip=True)
@@ -475,7 +477,7 @@ class Source(AbstractSearchSource):
                         date_is_derived = True
 
                     # Parse filesize from the <tr> with <i class="fa-hdd">
-                    size_td = tab.select_one("tr:has(th>i.fa-hdd) td")
+                    size_td = tab.select_one("th:has(> i.fa-hdd) ~ td")
                     mb = 0
                     if size_td:
                         size_text = size_td.get_text(strip=True)

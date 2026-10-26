@@ -16,7 +16,7 @@ Retries), nicht im Fork.
   Zeilenbeschriftungen gelten auch für die Fork-Prüfung `_tab_offers_episode`).
 - Sicherheitsfixes, CI-Pflege und Abhängigkeits-Pins, ohne die ein Rebuild bricht.
 
-Aktueller Upstream-Stand: **`4.7.3-maja.42`** (2026-10-17).
+Aktueller Upstream-Stand: **`4.7.7-maja.43`** (2026-10-24).
 
 **Was nicht mehr passiert:**
 - Verhaltens-Fixes für neue Fehlerformen (Numbering, Sprach-Flags, Regrab-Schleifen, …).

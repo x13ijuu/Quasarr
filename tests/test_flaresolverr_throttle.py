@@ -121,6 +121,34 @@ class FlareSolverrThrottleTests(unittest.TestCase):
         self.assertIn("saturated", str(caught.exception).lower())
         post.assert_not_called()
 
+    def test_saturated_create_queues_no_session_cleanup(self):
+        """Merge 4.7.7: a full slot raises before any request left — no browser
+        can exist, so upstream's bounded cleanup must not poll for ten minutes."""
+        self._set_cap(1)
+        cloudflare._solve_slots.acquire()  # occupy the only slot
+        self.addCleanup(cloudflare._solve_slots.release)
+
+        with patch.object(cloudflare, "is_flaresolverr_available", return_value=True), patch.object(
+            cloudflare, "FLARESOLVERR_SLOT_WAIT_SECONDS", 0.1
+        ), patch.object(cloudflare.requests, "post") as post, patch.object(
+            cloudflare, "_schedule_session_cleanup"
+        ) as cleanup:
+            result = cloudflare.flaresolverr_create_session(_shared_state(), "sid-full")
+
+        self.assertIsNone(result)
+        post.assert_not_called()
+        cleanup.assert_not_called()
+
+    def test_failed_create_that_was_sent_queues_cleanup(self):
+        self._set_cap(1)
+        with patch.object(cloudflare, "is_flaresolverr_available", return_value=True), patch.object(
+            cloudflare.requests, "post", side_effect=TimeoutError("create timed out")
+        ), patch.object(cloudflare, "_schedule_session_cleanup") as cleanup:
+            result = cloudflare.flaresolverr_create_session(_shared_state(), "sid-sent")
+
+        self.assertIsNone(result)
+        cleanup.assert_called_once_with("http://flaresolverr:8191/v1", "sid-sent")
+
     def test_wait_is_capped_by_the_callers_timeout(self):
         self._set_cap(1)
         cloudflare._solve_slots.acquire()
