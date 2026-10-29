@@ -5,12 +5,12 @@
 import re
 import sys
 
-__version__ = "4.7.8"
+__version__ = "4.7.9"
 
 # Fork patch level (x13ijuu/Quasarr). Kept separate from __version__ because
 # _version_key()/hatchling cannot parse PEP-440 local versions ("4.6.2+maja.1").
 # Docker image tags carry the full fork version, e.g. "4.6.2-maja.1".
-MAJA_PATCH_LEVEL = 44
+MAJA_PATCH_LEVEL = 45
 
 
 def get_version():
