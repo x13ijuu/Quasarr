@@ -210,6 +210,11 @@ class Source(AbstractSearchSource):
                             search_type,
                             str(e) if "e" in dir() else "Error occurred",
                         )
+                # the relative "Posted N days ago" drifts with every search
+                # (fork: soup stays None when the detail budget is spent or
+                # the fetch failed — keep the relative date then)
+                if soup is not None:
+                    published = _parse_published_meta(soup) or published
                 try:
                     imdb_link = soup.find(
                         "a", href=re.compile(r"imdb\.com/title/tt\d+", re.IGNORECASE)
@@ -264,6 +269,17 @@ class Source(AbstractSearchSource):
         if releases:
             clear_hostname_issue(self.initials)
         return releases
+
+
+def _parse_published_meta(soup):
+    meta = soup.find("meta", attrs={"itemprop": "datePublished"})
+    try:
+        published = datetime.fromisoformat(meta["content"])
+        return published.astimezone(timezone.utc).strftime(
+            "%a, %d %b %Y %H:%M:%S +0000"
+        )
+    except Exception:
+        return ""
 
 
 def _parse_posted_ago(txt):
