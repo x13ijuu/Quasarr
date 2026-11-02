@@ -14,7 +14,10 @@ import quasarr.providers.web_server
 from quasarr.api import get_api
 from quasarr.constants import FALLBACK_USER_AGENT
 from quasarr.providers import shared_state, version
-from quasarr.providers.hostname_issues import clear_all_hostname_issues
+from quasarr.providers.hostname_issues import (
+    clear_all_hostname_issues,
+    record_configured_hostnames,
+)
 from quasarr.providers.log import (
     crit,
     debug,
@@ -26,6 +29,7 @@ from quasarr.providers.log import (
 )
 from quasarr.providers.notifications import send_notification
 from quasarr.providers.notifications.helpers.notification_types import NotificationType
+from quasarr.providers.statistics import StatsHelper
 from quasarr.providers.utils import (
     Unbuffered,
     check_flaresolverr,
@@ -148,6 +152,7 @@ def run():
         Config.prune_unsupported_keys(shared_state.values["configfile"])
         shared_state.update("config", Config)
         shared_state.update("database", DataBase)
+        StatsHelper(shared_state).prune()
         supported_hostnames = extract_allowed_keys(Config._DEFAULT_CONFIG, "Hostnames")
         shared_state.update("sites", [key.upper() for key in supported_hostnames])
         # Set fallback user agent immediately so it's available while background check runs
@@ -164,6 +169,8 @@ def run():
         if not hostnames:
             hostnames_config(shared_state)
             hostnames = get_clean_hostnames(shared_state)
+
+        record_configured_hostnames()
 
         # Check credentials for login-required hostnames
         skip_login_db = DataBase("skip_login")
