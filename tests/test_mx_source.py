@@ -128,10 +128,6 @@ def build_fake_get(responses):
             return FakeResponse(responses.get("search", {"results": []}))
         if "/darkiworld/download/" in url:
             return FakeResponse(responses.get("links", {"success": False}))
-        if "/darkiworld/decode/" in url:
-            return FakeResponse(
-                responses.get("decode", {"embed_url": {"lien": DECODED_URL}})
-            )
         raise AssertionError(f"Unexpected URL: {url}")
 
     fake_get.calls = calls
@@ -212,13 +208,41 @@ class MxSearchTests(unittest.TestCase):
         self.assertEqual(details["imdb_id"], "tt0000001")
         self.assertEqual(details["size"], 4827965566)
         self.assertEqual(releases[0]["type"], "protected")
-        # The decoded hoster URL (not the source link id) is what gets downloaded.
-        self.assertEqual(captured["url"], DECODED_URL)
+        # Turnstile-gated decode is deferred to the download twin so search/feed
+        # never touch /darkiworld/decode/.
+        self.assertEqual(
+            captured["url"],
+            "https://api.source.invalid/api/darkiworld/decode/900001?title_id=222&host=1Fichier",
+        )
         self.assertEqual(captured["key"], "mx")
         # Download endpoint must target the IMDb-matched id (222), not the first.
         download_calls = [c for c in fake_get.calls if "/download/movie/" in c[0]]
         self.assertEqual(len(download_calls), 1)
         self.assertIn("/download/movie/222", download_calls[0][0])
+
+    def test_search_uses_direct_lien_when_present(self):
+        links = {
+            "success": True,
+            "all": [
+                {
+                    "id": 900009,
+                    "lien": DECODED_URL,
+                    "quality": "1080p",
+                    "host_name": "1fichier",
+                    "language": "MULTi",
+                    "size": 1000000000,
+                    "upload_date": "2026-05-16T16:21:06.000000Z",
+                    "source": "hydracker-live",
+                }
+            ],
+        }
+        releases, captured, _ = self._run_search(
+            {"search": MOVIE_RESULTS, "links": links},
+            "Some Movie",
+            search_string="tt0000001",
+        )
+        self.assertEqual(len(releases), 1)
+        self.assertEqual(captured["url"], DECODED_URL)
 
     def test_non_imdb_query_returns_empty(self):
         releases, _, fake_get = self._run_search(
@@ -819,6 +843,113 @@ class MxDownloadTests(unittest.TestCase):
             {"links": []},
         )
 
+    def test_deferred_decode_url_solves_turnstile_and_posts_token(self):
+        ss = make_shared_state()
+        decode_url = "https://api.source.invalid/api/darkiworld/decode/900001?title_id=222&host=1Fichier"
+        fs_response = SimpleNamespace(
+            status_code=200,
+            execute_js_result='{"token": "ts-tok-123", "error": null}',
+        )
+        post_calls = []
+
+        def fake_post(url, params=None, json=None, headers=None, timeout=None):
+            post_calls.append((url, params, json, headers))
+            return FakeResponse(
+                {"success": True, "embed_url": {"lien": DECODED_URL}}, status_code=200
+            )
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "quasarr.downloads.sources.mx.is_flaresolverr_available",
+                    return_value=True,
+                )
+            )
+            create = stack.enter_context(
+                patch(
+                    "quasarr.downloads.sources.mx.flaresolverr_create_session",
+                    return_value="sid-1",
+                )
+            )
+            destroy = stack.enter_context(
+                patch("quasarr.downloads.sources.mx.flaresolverr_destroy_session")
+            )
+            fs_get = stack.enter_context(
+                patch(
+                    "quasarr.downloads.sources.mx.flaresolverr_get",
+                    return_value=fs_response,
+                )
+            )
+            stack.enter_context(
+                patch("quasarr.downloads.sources.mx.requests.post", fake_post)
+            )
+            clear = stack.enter_context(
+                patch("quasarr.downloads.sources.mx.clear_hostname_issue")
+            )
+            result = DownloadSource().get_download_links(
+                ss, decode_url, ["1fichier"], "Some.Movie", None
+            )
+
+        self.assertEqual(result, {"links": [[DECODED_URL, "1fichier"]]})
+        create.assert_called_once_with(ss)
+        destroy.assert_called_once_with(ss, "sid-1")
+        self.assertEqual(fs_get.call_args.args[1], "https://source.invalid/")
+        self.assertEqual(len(post_calls), 1)
+        self.assertEqual(
+            post_calls[0][0],
+            "https://api.source.invalid/api/darkiworld/decode/900001",
+        )
+        self.assertEqual(post_calls[0][1], {"title_id": "222"})
+        self.assertEqual(post_calls[0][2], {"turnstileToken": "ts-tok-123"})
+        clear.assert_called_once_with("mx")
+
+    def test_deferred_decode_skips_flaresolverr_when_host_hint_not_in_mirrors(self):
+        ss = make_shared_state()
+        decode_url = "https://api.source.invalid/api/darkiworld/decode/900001?title_id=222&host=1Fichier"
+        with patch(
+            "quasarr.downloads.sources.mx.flaresolverr_create_session"
+        ) as create:
+            result = DownloadSource().get_download_links(
+                ss, decode_url, ["rapidgator"], "Some.Movie", None
+            )
+        self.assertEqual(result, {"links": []})
+        create.assert_not_called()
+
+    def test_deferred_decode_destroys_session_when_flaresolverr_raises(self):
+        ss = make_shared_state()
+        decode_url = "https://api.source.invalid/api/darkiworld/decode/900001?title_id=222&host=1Fichier"
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "quasarr.downloads.sources.mx.is_flaresolverr_available",
+                    return_value=True,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "quasarr.downloads.sources.mx.flaresolverr_create_session",
+                    return_value="sid-err",
+                )
+            )
+            destroy = stack.enter_context(
+                patch("quasarr.downloads.sources.mx.flaresolverr_destroy_session")
+            )
+            stack.enter_context(
+                patch(
+                    "quasarr.downloads.sources.mx.flaresolverr_get",
+                    side_effect=RuntimeError("browser crash"),
+                )
+            )
+            mark = stack.enter_context(
+                patch("quasarr.downloads.sources.mx.mark_hostname_issue")
+            )
+            result = DownloadSource().get_download_links(
+                ss, decode_url, [], "Some.Movie", None
+            )
+        self.assertEqual(result, {"links": []})
+        destroy.assert_called_once_with(ss, "sid-err")
+        mark.assert_called_once()
+
 
 class MxHelperTests(unittest.TestCase):
     def test_sanitize_preserves_accents_collapses_punctuation(self):
@@ -848,7 +979,9 @@ class MxDnsFloodRegressionTests(unittest.TestCase):
     The MX crawler fired hundreds of bare requests.get() calls per feed run
     (fresh DNS + TLS each) and re-asked dead decode ids on every crawl (the
     same 404 id was requested 227x in 24h), tripping AdGuard's per-subnet
-    rate limit and degrading DNS for every container on the host.
+    rate limit and degrading DNS for every container on the host. The fork's
+    negative decode cache was dropped with upstream v.5.2.0, which no longer
+    decodes during search at all.
     """
 
     LINKS_TWO = {
@@ -872,12 +1005,6 @@ class MxDnsFloodRegressionTests(unittest.TestCase):
             },
         ],
     }
-
-    def setUp(self):
-        from quasarr.search.sources import mx as mx_module
-
-        self.mx = mx_module
-        mx_module._clear_dead_decode_cache()
 
     def _fake_get(self):
         calls = []
@@ -921,53 +1048,13 @@ class MxDnsFloodRegressionTests(unittest.TestCase):
     def _decode_calls(self, fake, link_id):
         return [u for u, _ in fake.calls if f"/darkiworld/decode/{link_id}" in u]
 
-    def test_dead_decode_is_skipped_but_healthy_links_survive(self):
+    def test_search_never_calls_the_decode_endpoint(self):
+        # Since upstream v.5.2.0 decode is deferred to the download twin; the
+        # per-link decode calls that drove the flood must stay out of search.
         fake = self._fake_get()
         releases = self._run(fake)
-        # The 404 must not abort the whole item anymore: the healthy link's
-        # release is still built.
-        self.assertEqual(1, len(releases))
-        self.assertEqual(1, len(self._decode_calls(fake, 19320940)))
-
-        # Second crawl: the dead id is served from the negative cache — the
-        # decode endpoint is NOT asked again, the healthy link still resolves.
-        releases2 = self._run(fake)
-        self.assertEqual(1, len(releases2))
-        self.assertEqual(
-            1,
-            len(self._decode_calls(fake, 19320940)),
-            "dead decode id must not be re-requested within the TTL",
-        )
-        self.assertEqual(2, len(self._decode_calls(fake, 900002)))
-
-    def test_negative_cache_expires(self):
-        fake = self._fake_get()
-        self._run(fake)
-        self.assertEqual(1, len(self._decode_calls(fake, 19320940)))
-
-        # Force expiry, then the id must be retried exactly once more.
-        with self.mx._dead_decode_lock:
-            for key in list(self.mx._dead_decode_until):
-                self.mx._dead_decode_until[key] = 0.0
-        self._run(fake)
-        self.assertEqual(2, len(self._decode_calls(fake, 19320940)))
-
-    def test_non_404_decode_errors_still_raise(self):
-        fake = self._fake_get()
-        real = fake
-
-        def with_503(url, params=None, headers=None, timeout=None):
-            if "/darkiworld/decode/900002" in url:
-                return FakeResponse({}, status_code=503)
-            return real(url, params=params, headers=headers, timeout=timeout)
-
-        with_503.calls = real.calls
-        # 503 is transient — it must NOT be swallowed into the negative cache.
-        releases = self._run(with_503)
-        self.assertEqual([], releases)
-        with self.mx._dead_decode_lock:
-            dead_ids = [k[0] for k in self.mx._dead_decode_until]
-        self.assertNotIn("900002", dead_ids)
+        self.assertEqual(2, len(releases))
+        self.assertEqual([], self._decode_calls(fake, ""))
 
     def test_all_traffic_uses_the_pooled_session(self):
         def bomb(*_a, **_k):
@@ -996,5 +1083,5 @@ class MxDnsFloodRegressionTests(unittest.TestCase):
             releases = SearchSource().search(
                 ss, 0.0, SEARCH_CAT_MOVIES, search_string="tt0000001"
             )
-        self.assertEqual(1, len(releases))
+        self.assertEqual(2, len(releases))
         self.assertGreater(len(fake.calls), 0)
