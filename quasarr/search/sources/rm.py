@@ -68,13 +68,16 @@ class Source(AbstractSearchSource):
             return releases
 
         try:
-            soup = _require_layout(
-                _get_page(shared_state, "/", FEED_REQUEST_TIMEOUT_SECONDS),
-                "div.blog-post",
+            items = _parse_feed(
+                _get_page(shared_state, "/", FEED_REQUEST_TIMEOUT_SECONDS)
             )
+            # single odd posts are skipped; only a feed without any release is broken
+            if not items:
+                raise ValueError("Unexpected page layout (no parsable releases)")
+            clear_hostname_issue(self.initials)
             items = [
                 item
-                for item in _parse_feed(soup)
+                for item in items
                 if _title_fits_category(base_category, item["title"])
             ]
             releases = _build_search_results(shared_state, items, search_category)
@@ -121,6 +124,8 @@ class Source(AbstractSearchSource):
             releases = _build_search_results(
                 shared_state, items, search_category, imdb_id=imdb_id
             )
+            if items:
+                clear_hostname_issue(self.initials)
         except Exception as e:
             warn(f"Error loading search: {e}")
             mark_hostname_issue(self.initials, "search", str(e))
@@ -151,9 +156,14 @@ def _title_fits_category(base_category, title):
 
 def _clean_title(raw_title):
     title = html.unescape(str(raw_title or ""))
+    title = html.unescape(title)
+    title = title.replace("&", " and ")
     title = _LEADING_TAG_REGEX.sub("", " ".join(title.split()))
     title = _TRAILING_SIZE_REGEX.sub("", title)
-    return title.strip().replace("(", "").replace(")", "").replace(" ", ".")
+    title = re.sub(r"['\":\(\)\[\]]", "", title)
+    title = title.strip().replace(" ", ".")
+    title = re.sub(r"\.+", ".", title)
+    return title.strip(".")
 
 
 def _size_mb(text):
@@ -204,31 +214,38 @@ def _release_href(anchor):
 def _parse_feed(soup):
     items = []
     for post in soup.select("div.blog-post"):
-        anchor = post.select_one("h3 a")
-        href = _release_href(anchor)
-        if not href:
-            continue
+        try:
+            anchor = post.select_one("h3 a")
+            href = _release_href(anchor)
+            if not href:
+                continue
 
-        size_match = re.search(r"FILE SIZE:\s*([\d.]+\s*[KMGT]B)", post.get_text(" "))
-        imdb_link = post.find("a", href=IMDB_REGEX)
-        items.append(
-            {
-                "title": _clean_title(anchor.get_text()),
-                "href": href,
-                "size_mb": _size_mb(size_match.group(1)) if size_match else 0,
-                "date": _feed_date(post),
-                "imdb_id": IMDB_REGEX.search(imdb_link["href"]).group(1)
-                if imdb_link
-                else None,
-            }
-        )
+            size_match = re.search(
+                r"FILE SIZE:\s*([\d.]+\s*[KMGT]B)", post.get_text(" ")
+            )
+            imdb_link = post.find("a", href=IMDB_REGEX)
+            items.append(
+                {
+                    "title": _clean_title(anchor.get_text()),
+                    "href": href,
+                    "size_mb": _size_mb(size_match.group(1)) if size_match else 0,
+                    "date": _feed_date(post),
+                    "imdb_id": IMDB_REGEX.search(imdb_link["href"]).group(1)
+                    if imdb_link
+                    else None,
+                }
+            )
+        except Exception as e:
+            debug(f"Skipping unparsable feed post: {e}")
     return items
 
 
 def _parse_production_page(soup):
     """A title page lists all of its releases (movies, season packs, episodes)."""
     items = []
-    for entry in soup.select("ul.allrls li"):
+    for entry in soup.select("ul.allrls:not(#archived) li"):
+        if entry.select_one(".dead"):
+            continue
         anchor = entry.find("a", href=True)
         href = _release_href(anchor)
         if not href:
@@ -287,11 +304,17 @@ def _search_by_imdb(shared_state, imdb_id):
         if href and not href.startswith("/release/"):
             # the title page has every release of the production, not just the
             # handful the search page previews
-            title_soup = _require_layout(
-                _get_page(shared_state, href, SEARCH_REQUEST_TIMEOUT_SECONDS),
-                "div.blog-details",
-            )
-            return _parse_production_page(title_soup)
+            try:
+                title_soup = _require_layout(
+                    _get_page(shared_state, href, SEARCH_REQUEST_TIMEOUT_SECONDS),
+                    "div.blog-details",
+                )
+                items = _parse_production_page(title_soup)
+                if items:
+                    return items
+            except Exception as e:
+                debug(f"Failed to fetch or parse production page {href}: {e}")
+            break
 
     return _parse_release_results(soup)
 
