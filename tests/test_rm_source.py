@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 
+import threading
 import time
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,6 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from quasarr.constants import SEARCH_CAT_MOVIES, SEARCH_CAT_SHOWS
+from quasarr.downloads.sources import rm as rm_downloads
 from quasarr.downloads.sources.rm import (
     Source as DownloadSource,
 )
@@ -18,6 +21,11 @@ from quasarr.downloads.sources.rm import (
     _extract_imdb_id,
     _extract_release_slug,
     _get_base_url,
+    _get_page,
+)
+from quasarr.providers.cloudflare import (
+    FlareSolverrResponse,
+    _clear_cloudflare_gate_cache,
 )
 from quasarr.search.sources.rm import (
     Source as SearchSource,
@@ -116,7 +124,7 @@ class ParsingTests(unittest.TestCase):
         )
 
     def test_feed_posts_carry_date_size_and_imdb(self):
-        items = _parse_feed(soup(FEED_HTML))
+        items = _parse_feed(FEED_HTML)
 
         self.assertEqual(2, len(items))
         first = items[0]
@@ -125,6 +133,25 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual("tt0000001", first["imdb_id"])
         self.assertEqual("Mon, 02 Nov 2026 00:00:00 +0000", first["date"])
         self.assertIsNone(items[1]["imdb_id"])
+
+    def test_unclosed_markup_in_one_post_spares_the_others(self):
+        movie, show, other = FEED_HTML.split('<div class="blog-post clear">')[1:]
+        for opener in ("<!--", "<script>", "<style>", "<textarea>", "<title>"):
+            with self.subTest(opener=opener):
+                broken = movie.replace("</h3>", f"</h3><pre>{opener}</pre>", 1)
+                markup = "".join(
+                    f'<div class="blog-post clear">{post}'
+                    for post in (broken, show, other)
+                )
+                items = _parse_feed(f"<div>banner {opener}</div>{markup}")
+
+                self.assertEqual(
+                    [
+                        "Synthetic.Movie.2026.1080p.WEB-DL.x264-GRP",
+                        "Synthetic.Show.S01E02.720p.WEB-DL.x264-GRP",
+                    ],
+                    [item["title"] for item in items],
+                )
 
     def test_production_page_lists_packs_and_episodes(self):
         items = _parse_production_page(soup(PRODUCTION_HTML))
@@ -197,6 +224,24 @@ class DownloadTests(unittest.TestCase):
             ],
             links,
         )
+
+    def test_stray_openers_in_page_text_do_not_hide_the_page(self):
+        intact = "<title>RM</title><script>var a = 1;</script><!-- note -->"
+        for opener in ("<!--", "<script>", "<style>", "<textarea>", "<title>"):
+            with self.subTest(opener=opener):
+                markup = (
+                    f"{intact}<div>banner {opener}</div>{RELEASE_HTML}{RESULTS_HTML}"
+                )
+                with patch(
+                    "quasarr.downloads.sources.rm._get_content",
+                    return_value=markup.encode(),
+                ):
+                    page = _get_page(shared_state(), "/", 1)
+
+                self.assertEqual(3, len(_extract_download_links(page)))
+                self.assertTrue(_parse_release_results(page))
+                self.assertEqual("var a = 1;", page.script.string)
+                self.assertEqual("RM", page.title.string)
 
     def test_mirror_whitelist_filters_hosters(self):
         links = _extract_download_links(soup(RELEASE_HTML), ["nitroflare"])
@@ -284,6 +329,113 @@ class DownloadTests(unittest.TestCase):
         mark.assert_called_once()
 
 
+def page_response(status, body):
+    response = requests.Response()
+    response.status_code = status
+    response._content = body.encode()
+    return response
+
+
+SECURITY_CHECK = "<title>Attention Required! | Synthetic</title><form></form>"
+
+
+class SecurityCheckTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(_clear_cloudflare_gate_cache)
+        self.addCleanup(rm_downloads._SESSION.cookies.clear)
+        self.passed = threading.Event()
+        self.solves = []
+        for target in ("quasarr.downloads.sources.rm", "quasarr.providers.cloudflare"):
+            available = patch(f"{target}.is_flaresolverr_available", return_value=True)
+            available.start()
+            self.addCleanup(available.stop)
+        for name, value in (
+            ("flaresolverr_create_session", "session"),
+            ("flaresolverr_destroy_session", None),
+        ):
+            helper = patch(f"quasarr.providers.cloudflare.{name}", return_value=value)
+            helper.start()
+            self.addCleanup(helper.stop)
+
+    def plain_get(self, *_args, **_kwargs):
+        if self.passed.is_set():
+            return page_response(200, "<title>Synthetic</title>passed")
+        return page_response(200, SECURITY_CHECK)
+
+    def solve(self, status=200):
+        def fake(_state, url, **_kwargs):
+            self.solves.append(url)
+            time.sleep(0.2)
+            self.passed.set()
+            cookies = requests.cookies.RequestsCookieJar()
+            cookies.set("clearance", "x", domain="source.invalid", path="/")
+            return FlareSolverrResponse(url, status, {}, "solved", cookies=cookies)
+
+        return patch("quasarr.providers.cloudflare.flaresolverr_get", side_effect=fake)
+
+    def test_parallel_requests_share_one_solve(self):
+        results = []
+        start = threading.Barrier(2)
+
+        def fetch(path):
+            start.wait()
+            results.append(rm_downloads._get_content(shared_state(), path, 5))
+
+        with (
+            patch.object(rm_downloads._SESSION, "get", side_effect=self.plain_get),
+            self.solve(),
+        ):
+            threads = [
+                threading.Thread(target=fetch, args=(path,))
+                for path in ("/release/a", "/release/b")
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(1, len(self.solves))
+        self.assertEqual(
+            sorted([b"solved", b"<title>Synthetic</title>passed"]), sorted(results)
+        )
+        self.assertEqual("x", rm_downloads._SESSION.cookies.get("clearance"))
+
+    def test_removed_release_behind_the_check_stays_a_404(self):
+        with (
+            patch.object(rm_downloads._SESSION, "get", side_effect=self.plain_get),
+            self.solve(status=404),
+            patch("quasarr.downloads.sources.rm.mark_hostname_issue") as mark,
+        ):
+            result = DownloadSource().get_download_links(
+                shared_state(), "https://source.invalid/release/gone", [], "t", ""
+            )
+
+        self.assertEqual({"links": [], "imdb_id": None}, result)
+        mark.assert_not_called()
+
+    def test_missing_flaresolverr_names_the_security_check(self):
+        with (
+            patch.object(rm_downloads._SESSION, "get", side_effect=self.plain_get),
+            patch(
+                "quasarr.downloads.sources.rm.is_flaresolverr_available",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "security check"):
+                rm_downloads._get_content(shared_state(), "/", 5)
+
+    def test_slow_solve_explains_the_missing_results(self):
+        with (
+            patch.object(rm_downloads._SESSION, "get", side_effect=self.plain_get),
+            self.solve(),
+            patch("quasarr.downloads.sources.rm.SEARCH_FANOUT_DEADLINE_SECONDS", 0),
+            patch("quasarr.downloads.sources.rm.info") as info,
+        ):
+            rm_downloads._get_content(shared_state(), "/", 5)
+
+        self.assertIn("security check", info.call_args.args[0])
+
+
 class SearchFlowTests(unittest.TestCase):
     def setUp(self):
         link = patch(
@@ -300,7 +452,17 @@ class SearchFlowTests(unittest.TestCase):
         def fake(_state, path, _timeout):
             return soup(mapping[path])
 
-        return patch("quasarr.search.sources.rm._get_page", side_effect=fake)
+        def fake_markup(_state, path, _timeout):
+            return mapping[path]
+
+        stack = ExitStack()
+        stack.enter_context(
+            patch("quasarr.search.sources.rm._get_page", side_effect=fake)
+        )
+        stack.enter_context(
+            patch("quasarr.search.sources.rm._get_markup", side_effect=fake_markup)
+        )
+        return stack
 
     def test_feed_keeps_only_the_requested_category(self):
         with self.pages({"/": FEED_HTML}):
@@ -420,7 +582,7 @@ class SearchFlowTests(unittest.TestCase):
     def test_failed_request_marks_the_host(self):
         with (
             patch(
-                "quasarr.search.sources.rm._get_page", side_effect=RuntimeError("503")
+                "quasarr.search.sources.rm._get_markup", side_effect=RuntimeError("503")
             ),
             patch("quasarr.search.sources.rm.mark_hostname_issue") as mark,
         ):
