@@ -10,7 +10,7 @@ __version__ = "5.3.0"
 # Fork patch level (x13ijuu/Quasarr). Kept separate from __version__ because
 # _version_key()/hatchling cannot parse PEP-440 local versions ("4.6.2+maja.1").
 # Docker image tags carry the full fork version, e.g. "4.6.2-maja.1".
-MAJA_PATCH_LEVEL = 49
+MAJA_PATCH_LEVEL = 50
 
 
 def get_version():
