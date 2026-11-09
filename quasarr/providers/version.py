@@ -5,7 +5,7 @@
 import re
 import sys
 
-__version__ = "5.3.0"
+__version__ = "6.0.0"
 
 # Fork patch level (x13ijuu/Quasarr). Kept separate from __version__ because
 # _version_key()/hatchling cannot parse PEP-440 local versions ("4.6.2+maja.1").

@@ -196,7 +196,10 @@ def get_search_results(
             for source in sources.values():
                 source_logger = get_source_logger(source.initials)
 
-                if not config.get(source.initials):
+                if not (
+                    getattr(source, "custom_hostname", None)
+                    or config.get(source.initials)
+                ):
                     source_logger.trace("Hostname missing in config")
                     continue
 
@@ -286,7 +289,10 @@ def get_search_results(
             for source in sources.values():
                 source_logger = get_source_logger(source.initials)
 
-                if not config.get(source.initials):
+                if not (
+                    getattr(source, "custom_hostname", None)
+                    or config.get(source.initials)
+                ):
                     source_logger.trace("Hostname missing in config")
                     continue
 
@@ -326,7 +332,9 @@ def get_search_results(
         for source in sources.values():
             source_logger = get_source_logger(source.initials)
 
-            if not config.get(source.initials):
+            if not (
+                getattr(source, "custom_hostname", None) or config.get(source.initials)
+            ):
                 source_logger.trace("Hostname missing in config")
                 continue
 
