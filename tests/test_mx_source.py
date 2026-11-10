@@ -177,7 +177,7 @@ class MxSearchTests(unittest.TestCase):
             fake_get = build_fake_get(responses)
             stack.enter_context(
                 patch(
-                    "quasarr.search.sources.templates.mx.search.requests.get", fake_get
+                    "quasarr.search.sources.templates.mx.search._session.get", fake_get
                 )
             )
             patch_issue_tracking(stack)
@@ -264,7 +264,7 @@ class MxSearchTests(unittest.TestCase):
             fake_get = build_fake_get({"search": SHOW_RESULTS, "links": SHOW_LINKS})
             stack.enter_context(
                 patch(
-                    "quasarr.search.sources.templates.mx.search.requests.get", fake_get
+                    "quasarr.search.sources.templates.mx.search._session.get", fake_get
                 )
             )
             patch_issue_tracking(stack)
@@ -301,7 +301,7 @@ class MxSearchTests(unittest.TestCase):
             fake_get = build_fake_get({"search": SHOW_RESULTS, "links": SHOW_LINKS})
             stack.enter_context(
                 patch(
-                    "quasarr.search.sources.templates.mx.search.requests.get", fake_get
+                    "quasarr.search.sources.templates.mx.search._session.get", fake_get
                 )
             )
             patch_issue_tracking(stack)
@@ -326,7 +326,7 @@ class MxFeedTests(unittest.TestCase):
             fake_get = build_fake_get({"search": MOVIE_RESULTS, "links": MOVIE_LINKS})
             stack.enter_context(
                 patch(
-                    "quasarr.search.sources.templates.mx.search.requests.get", fake_get
+                    "quasarr.search.sources.templates.mx.search._session.get", fake_get
                 )
             )
             patch_issue_tracking(stack)
@@ -358,7 +358,7 @@ class MxFeedTests(unittest.TestCase):
             fake_get = build_fake_get({"search": SHOW_RESULTS, "links": SHOW_LINKS})
             stack.enter_context(
                 patch(
-                    "quasarr.search.sources.templates.mx.search.requests.get", fake_get
+                    "quasarr.search.sources.templates.mx.search._session.get", fake_get
                 )
             )
             patch_issue_tracking(stack)
@@ -472,7 +472,7 @@ class MxFeedTests(unittest.TestCase):
             fake_get = build_fake_get({"search": {"results": []}})
             stack.enter_context(
                 patch(
-                    "quasarr.search.sources.templates.mx.search.requests.get", fake_get
+                    "quasarr.search.sources.templates.mx.search._session.get", fake_get
                 )
             )
             stack.enter_context(
@@ -767,7 +767,7 @@ class MxSpecialsTests(unittest.TestCase):
             fake_get = build_fake_get({"search": show_results, "links": show_links})
             stack.enter_context(
                 patch(
-                    "quasarr.search.sources.templates.mx.search.requests.get", fake_get
+                    "quasarr.search.sources.templates.mx.search._session.get", fake_get
                 )
             )
             patch_issue_tracking(stack)
@@ -953,6 +953,73 @@ class MxHelperTests(unittest.TestCase):
         self.assertEqual(_normalize_quality("Ultra HD x265"), "2160p.x265")
         # Unrecognized labels fall back to the cleaned raw string.
         self.assertEqual(_normalize_quality("DVDRIP MKV"), "DVDRIP.MKV")
+
+
+class MxCatalogueTypeTests(unittest.TestCase):
+    """Maja fork: a release whose catalogue classification contradicts the search
+    category is dropped at the source, before any link/decode traffic. MX indexes
+    some shows as a single movie entry (no season/episode), which the movie branch
+    would stamp with the YEAR where the episode tag belongs — Sonarr then misreads
+    e.g. 2024 as S20E24. Guard against both directions, and against over-blocking.
+    """
+
+    def _run(self, responses, category, **kwargs):
+        ss = make_shared_state()
+        with ExitStack() as stack:
+            fake_get = build_fake_get(responses)
+            stack.enter_context(
+                patch(
+                    "quasarr.search.sources.templates.mx.search._session.get", fake_get
+                )
+            )
+            patch_issue_tracking(stack)
+            stack.enter_context(
+                patch(
+                    "quasarr.search.sources.templates.mx.search.get_localized_title",
+                    return_value="Some Title",
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "quasarr.search.sources.templates.mx.search.generate_download_link",
+                    lambda *a, **k: "http://dl",
+                )
+            )
+            releases = SearchSource().search(ss, 0.0, category, **kwargs)
+        return releases, fake_get
+
+    def test_series_entry_is_not_offered_to_a_movie_search(self):
+        releases, fake_get = self._run(
+            {"search": SHOW_RESULTS, "links": SHOW_LINKS},
+            SEARCH_CAT_MOVIES,
+            search_string="tt0000002",
+        )
+        self.assertEqual([], releases)
+        # Rejected before any link/decode traffic — the noise cost is the point.
+        self.assertFalse(any("/darkiworld/download/" in c[0] for c in fake_get.calls))
+
+    def test_movie_entry_is_not_offered_to_a_tv_search(self):
+        releases, fake_get = self._run(
+            {"search": MOVIE_RESULTS, "links": MOVIE_LINKS},
+            SEARCH_CAT_SHOWS,
+            search_string="tt0000001",
+            season=1,
+            episode=1,
+        )
+        self.assertEqual([], releases)
+        self.assertFalse(any("/darkiworld/download/" in c[0] for c in fake_get.calls))
+
+    def test_matching_classification_still_searches(self):
+        # Guard against over-blocking: a real movie in a movie search is untouched.
+        releases, fake_get = self._run(
+            {"search": MOVIE_RESULTS, "links": MOVIE_LINKS},
+            SEARCH_CAT_MOVIES,
+            search_string="tt0000001",
+        )
+        self.assertEqual(1, len(releases))
+        self.assertTrue(
+            any("/darkiworld/download/movie/" in c[0] for c in fake_get.calls)
+        )
 
 
 if __name__ == "__main__":

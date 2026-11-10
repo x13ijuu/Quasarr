@@ -50,6 +50,20 @@ from quasarr.search.sources.templates import site_url
 # responsive on large libraries.
 FEED_LIBRARY_LIMIT = 50
 
+# Maja fork: one pooled session for every MX request. The crawler fires hundreds
+# of API calls per feed run (search + download per seed, times up to 50 seeds);
+# with a bare requests.get() each resolved DNS and opened a fresh TLS connection —
+# measured 2026-08-16 as ~700 DNS queries/min on the API host, enough to trip
+# AdGuard's per-subnet rate limit and degrade DNS for every container on the box.
+# Keep-alive turns a crawl into a handful of connections (and DNS lookups). The
+# source is a process-wide singleton, so this session lives as long as the crawler
+# does; urllib3's pool is thread-safe under the executor's parallelism.
+_session = requests.Session()
+_session.mount(
+    "https://",
+    requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8),
+)
+
 
 class FeedBudgetSpent(Exception):
     """The feed's wall-clock budget ran out while a seed was still being read."""
@@ -99,7 +113,7 @@ class Source(AbstractSearchSource):
             "Referer": f"https://{host}/",
             "Origin": f"https://{host}",
         }
-        r = requests.get(
+        r = _session.get(
             f"{api_base}{path}", params=params, headers=headers, timeout=timeout
         )
         # The API answers 500 for content it does not index; treat as "no data"
@@ -289,6 +303,23 @@ class Source(AbstractSearchSource):
             return []
 
         media_type = "tv" if match.get("is_series") else "movie"
+
+        # Maja fork: the catalogue's own classification has to match what was asked
+        # for. MX indexes some shows as a single "movie" entry carrying no season or
+        # episode data; the movie branch then stamps the YEAR where the episode tag
+        # belongs. The resulting "Show.2024.1080p..." is not merely useless to Sonarr,
+        # it is actively misread — Sonarr parses the year as S20E24. Measured
+        # 2026-08-19: 85 of 88 results on one episode search were such titles, every
+        # one rejected with "Unable to identify correct episode(s)". Drop them at the
+        # source instead of flooding the *arr with unmappable noise.
+        base_search_category = get_base_search_category_id(search_category)
+        if base_search_category == SEARCH_CAT_SHOWS and media_type != "tv":
+            debug(f"[mx] {imdb_id} is not indexed as a series — skipping TV search")
+            return []
+        if base_search_category == SEARCH_CAT_MOVIES and media_type != "movie":
+            debug(f"[mx] {imdb_id} is indexed as a series — skipping movie search")
+            return []
+
         if media_type == "tv" and (season is None or episode is None):
             # The API requires both season and episode for series downloads.
             return []
