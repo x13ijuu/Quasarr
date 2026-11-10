@@ -189,6 +189,53 @@ def retry_waiting_package(shared_state, package_id):
     )
 
 
+def _park_banned_grab(
+    package_id,
+    source_key,
+    request_from,
+    download_category,
+    title,
+    url,
+    size_mb,
+    password,
+    imdb_id,
+    message="",
+):
+    """
+    Record a host ban and park the full re-download context so the waiting_worker
+    can retry it after the unban (never fail it — Sonarr would blocklist the only
+    release). Returns the SAB-style result for download().
+    """
+    from quasarr.providers.host_bans import park_waiting, record_ban
+
+    record_ban(source_key, message)
+    park_waiting(
+        package_id,
+        {
+            "title": title,
+            "url": url,
+            "size_mb": size_mb,
+            "password": password,
+            "imdb_id": imdb_id,
+            "source_key": source_key,
+            "download_category": download_category,
+            "request_from": request_from,
+            "package_id": package_id,
+            "reason": str(message)[:300],
+        },
+    )
+    info(
+        f'Host "{source_key}" is banned — parked "{title}" to wait for the unban '
+        f"(package {package_id})."
+    )
+    return {
+        "success": True,
+        "package_id": package_id,
+        "title": title,
+        "waiting": True,
+    }
+
+
 # =============================================================================
 # LINK CLASSIFICATION
 # =============================================================================
@@ -685,6 +732,29 @@ def download(
                 continue
             source_candidates.append((key, source, False))
 
+        # Maja fork (F3): if the authoritative source is a currently-banned host, do
+        # NOT hit it again — park the grab straight away so the waiting_worker retries
+        # it after the unban, instead of hammering a banned host.
+        from quasarr.providers.host_bans import HostBannedError, is_banned
+
+        if normalized_source_key and is_banned(normalized_source_key):
+            if package_id is None:
+                package_id = generate_deterministic_package_id(
+                    title, source_key, client_type, download_category
+                )
+            return _park_banned_grab(
+                package_id,
+                normalized_source_key,
+                request_from,
+                download_category,
+                title,
+                url,
+                size_mb,
+                password,
+                imdb_id,
+                "host still banned",
+            )
+
         for key, source, from_source_key in source_candidates:
             hostname = getattr(source, "custom_hostname", None) or config.get(key)
             if not from_source_key and not (
@@ -719,6 +789,31 @@ def download(
                     label = key.upper()
                     detected_source_key = key
                     break
+            except HostBannedError as e:
+                # Maja fork (F3): the host rate-limited/banned us mid-request. Park the
+                # grab and let the waiting_worker retry after the unban, rather than
+                # failing it (which Sonarr would blocklist).
+                banned_key = (getattr(e, "source_key", None) or key or "").lower()
+                if package_id is None:
+                    package_id = generate_deterministic_package_id(
+                        title,
+                        source_key or banned_key,
+                        client_type,
+                        download_category,
+                        identity=package_identity,
+                    )
+                return _park_banned_grab(
+                    package_id,
+                    banned_key,
+                    request_from,
+                    download_category,
+                    title,
+                    url,
+                    size_mb,
+                    password,
+                    imdb_id,
+                    str(e),
+                )
             except Exception as e:
                 info(f"Error getting download links from {key.upper()}: {e}")
                 if not from_source_key or (
