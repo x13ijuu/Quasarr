@@ -13,7 +13,7 @@ from xml.etree import ElementTree
 from bottle import request
 
 from quasarr.constants import SEARCH_FANOUT_DEADLINE_SECONDS
-from quasarr.downloads import download
+from quasarr.downloads import enqueue_grab
 from quasarr.downloads.packages import delete_package, get_packages
 from quasarr.providers import shared_state
 from quasarr.providers.auth import require_api_key
@@ -119,9 +119,15 @@ def setup_arr_routes(app):
             category_param = getattr(request.query, "cat", None)
             download_category = determine_category(request_from, category_param)
 
-            info(f"Attempting download for <y>{title}</y>")
+            # Async accept (Maja fork): Sonarr/Radarr use SABnzbd's addfile (this NZB
+            # upload), NOT addurl. enqueue_grab persists the grab and returns the nzo_id
+            # INSTANTLY; the background waiting_worker does the scrape/CAPTCHA/JD-add. A
+            # burst of grabs therefore never blocks Sonarr's client requests (which
+            # caused 15-40s hangs -> timeouts / downloadClientUnavailable -> Sonarr
+            # dropped the tracking -> orphaned completed downloads that never imported).
+            info(f"Queuing download for <y>{title}</y>")
             try:
-                downloaded = download(
+                downloaded = enqueue_grab(
                     shared_state,
                     request_from,
                     download_category,
@@ -133,28 +139,14 @@ def setup_arr_routes(app):
                     source_key,
                 )
             except Exception as e:
-                if type(e).__name__ == "TokenExpiredException":
-                    warn(
-                        f"Download failed for <y>{title}</y>: MyJDownloader token expired."
-                    )
-                    continue
-                raise e
+                error(f"Failed to queue <y>{title}</y>: {e}")
+                continue
             try:
-                success = downloaded["success"]
                 package_id = downloaded["package_id"]
-                title = downloaded["title"]
-                failed = downloaded.get("failed", False)
-
-                if success and not failed:
-                    info(f"<y>{title}</y> added successfully!")
-                else:
-                    warn(
-                        f"<y>{title}</y> added as failed package! See log for details."
-                    )
-
+                title = downloaded.get("title", title)
                 nzo_ids.append(package_id)
             except KeyError:
-                error(f"Failed to download <y>{title}</y> - no package_id returned")
+                info(f"Failed to queue <y>{title}</y> - no package_id returned")
 
         response = {"status": True, "nzo_ids": nzo_ids}
         if not nzo_ids:
@@ -234,9 +226,14 @@ def setup_arr_routes(app):
                         return {"status": False, "nzo_ids": [], "quasarr_error": True}
 
                     nzo_ids = []
-                    info(f"Attempting download for <y>{parsed_payload['title']}</y>")
+                    # Async accept (Maja fork): persist + return the nzo_id INSTANTLY
+                    # like real SABnzbd. The background waiting_worker does the actual
+                    # scrape/CAPTCHA/JD-add, so a burst of grabs never blocks Sonarr's
+                    # client requests (which caused timeouts -> dropped tracking ->
+                    # orphaned completed downloads).
+                    info(f"Queuing download for <y>{parsed_payload['title']}</y>")
 
-                    downloaded = download(
+                    downloaded = enqueue_grab(
                         shared_state,
                         request_from,
                         download_category,
@@ -249,23 +246,13 @@ def setup_arr_routes(app):
                     )
 
                     try:
-                        success = downloaded["success"]
                         package_id = downloaded["package_id"]
                         title = downloaded.get("title", parsed_payload["title"])
-                        failed = downloaded.get("failed", False)
-
-                        if success and not failed:
-                            info(f'"{title} added successfully!')
-                        else:
-                            warn(
-                                f'"{title} added as failed package! See log for details.'
-                            )
-
                         nzo_ids.append(package_id)
                         return {"status": True, "nzo_ids": nzo_ids}
                     except KeyError:
                         error(
-                            f'Failed to download "{parsed_payload["title"]}" - no package_id returned'
+                            f'Failed to queue "{parsed_payload["title"]}" - no package_id returned'
                         )
                         return {"status": True, "nzo_ids": [], "quasarr_error": True}
 
