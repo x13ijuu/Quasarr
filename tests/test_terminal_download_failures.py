@@ -42,9 +42,6 @@ class TerminalDownloadFailureTests(unittest.TestCase):
             patch("quasarr.downloads.clear_hostname_issue"),
             patch("quasarr.downloads.mark_hostname_issue"),
             patch("quasarr.downloads.package_id_exists", return_value=False),
-            # Maja fork: download() dedupes via find_existing_package() (it must tell
-            # a stale "failed" marker from a real duplicate), not package_id_exists().
-            patch("quasarr.downloads.find_existing_package", return_value=None),
             patch("quasarr.downloads.store_protected_links") as store_protected,
             patch("quasarr.downloads.download_package") as download_package,
             patch("quasarr.downloads.StatsHelper"),

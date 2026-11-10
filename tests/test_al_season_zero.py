@@ -30,8 +30,8 @@ which the caller turns into "Download failed").
 import unittest
 from unittest.mock import patch
 
-from quasarr.downloads.sources import al as al_download
-from quasarr.downloads.sources.al import _check_release, apply_arc_season
+from quasarr.search.sources.templates.al import download as al_download
+from quasarr.search.sources.templates.al.download import _check_release, apply_arc_season
 from quasarr.downloads.sources.helpers.anime_title import ReleaseInfo
 
 DETAILS_HTML = """

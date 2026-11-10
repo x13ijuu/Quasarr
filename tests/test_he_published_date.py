@@ -4,7 +4,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from quasarr.search.sources import he
+from quasarr.search.sources.templates.he import search as he
 
 POST_URL = "https://source.invalid/synthetic-show-s01e01/"
 
@@ -23,7 +23,7 @@ def _response(html):
 
 
 class HePublishedDateTests(unittest.TestCase):
-    def _search(self, post_html, detail_error=None):
+    def _search(self, post_html):
         shared_state = MagicMock()
         shared_state.values = {
             "user_agent": "test-agent",
@@ -31,8 +31,6 @@ class HePublishedDateTests(unittest.TestCase):
         }
 
         def get(url, **kwargs):
-            if url == POST_URL and detail_error is not None:
-                raise detail_error
             return _response(post_html if url == POST_URL else SEARCH_HTML)
 
         with (
@@ -55,21 +53,6 @@ class HePublishedDateTests(unittest.TestCase):
     def test_falls_back_to_relative_post_time(self):
         with patch.object(he, "_parse_posted_ago", return_value="relative"):
             self.assertEqual(["relative"], self._search("<div></div>"))
-
-    # fork (maja): the detail fetch can be skipped (budget) or fail; soup is
-    # then None and the relative date must survive instead of crashing.
-    def test_keeps_relative_date_when_detail_budget_is_spent(self):
-        with (
-            patch.object(he, "_detail_budget_exhausted", return_value=True),
-            patch.object(he, "_parse_posted_ago", return_value="relative"),
-        ):
-            self.assertEqual(["relative"], self._search("<unused/>"))
-
-    def test_keeps_relative_date_when_detail_fetch_fails(self):
-        with patch.object(he, "_parse_posted_ago", return_value="relative"):
-            self.assertEqual(
-                ["relative"], self._search("<unused/>", detail_error=OSError("boom"))
-            )
 
 
 if __name__ == "__main__":

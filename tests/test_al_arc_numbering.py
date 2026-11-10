@@ -18,7 +18,7 @@ still emit "Series.E57" so Sonarr's own absolute mapping applies.
 """
 import unittest
 
-from quasarr.downloads.sources.al import (
+from quasarr.search.sources.templates.al.download import (
     apply_arc_season,
     details_title_overrides_grabbed,
     title_season,

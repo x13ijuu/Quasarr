@@ -28,7 +28,7 @@ import unittest
 
 from bs4 import BeautifulSoup
 
-from quasarr.downloads.sources.al import (
+from quasarr.search.sources.templates.al.download import (
     _episode_link_count,
     _episode_loops,
     _tab_offers_episode,

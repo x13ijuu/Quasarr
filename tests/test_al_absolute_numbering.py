@@ -10,7 +10,7 @@ for the season in that case, and guess_release_title emits the correct absolute
 """
 import unittest
 
-from quasarr.downloads.sources.al import _extract_season_number_from_title
+from quasarr.search.sources.templates.al.download import _extract_season_number_from_title
 from quasarr.downloads.sources.helpers.anime_title import (
     ReleaseInfo,
     guess_release_title,

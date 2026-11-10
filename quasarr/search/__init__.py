@@ -2,7 +2,6 @@
 # Quasarr
 # Project by https://github.com/rix1337
 
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -30,13 +29,6 @@ from quasarr.search.sources import get_sources
 from quasarr.search.sources.helpers.search_source import AbstractSearchSource
 from quasarr.storage.categories import get_search_category_sources
 
-# Feed results are cached per (source, action, owner category). The previous hardcoded
-# 60s TTL was shorter than a single slow category pass (measured up to 160s), so the
-# cache-family optimization ("2040/2045 served from the 2000 crawl") never fired under
-# load and every *arr RSS sync re-crawled all sources. 600s is safe staleness for RSS
-# data that clients poll every 15-60 minutes.
-FEED_CACHE_TTL_SECONDS = int(os.environ.get("FEED_CACHE_TTL", "600"))
-
 
 def get_search_results(
     shared_state,
@@ -56,7 +48,6 @@ def get_search_results(
         get_search_behavior_category,
         get_search_cache_owner_category,
         get_search_capability_category,
-        normalize_optional_int,
         parse_episode_date,
         release_matches_search_category,
     )
@@ -70,26 +61,6 @@ def get_search_results(
     if episode_date:
         season = None
         episode = None
-
-    # Maja fork: Sonarr rewrites searches into TheXEM SCENE numbering before it
-    # reaches us. For anime whose mapping collapses all seasons into scene season
-    # 1 (InuYasha: TVDB S07E01 -> scene S01E168) the requested pair does not
-    # exist, and the DDL sites — which organise by TVDB seasons ("Staffel 7") —
-    # return nothing. Translate back via Sonarr's own episode data; no-op for
-    # valid pairs and absolute-only searches, fail-open when Sonarr is unset.
-    # bottle hands absent query parameters through as "" rather than None, so a
-    # bare `is not None` fired this on EVERY tv search and spent a Sonarr round
-    # trip on a request that could not translate anything.
-    if (
-        imdb_id
-        and normalize_optional_int(season) is not None
-        and normalize_optional_int(episode) is not None
-    ):
-        from quasarr.providers.sonarr_api import resolve_scene_numbering
-
-        translated = resolve_scene_numbering(shared_state, imdb_id, season, episode)
-        if translated:
-            season, episode = translated
 
     # Determine search category if not provided
     if not search_category:
@@ -171,20 +142,13 @@ def get_search_results(
 
         if base_search_category in [SEARCH_CAT_MOVIES, SEARCH_CAT_SHOWS]:
             args = (shared_state, start_time, behavior_search_category)
-
-            # Maja fork: an absolute-numbered request (episode, no season) is
-            # only answerable by AL/AT, so every other source was dropped below.
-            # The German sources that actually carry the content never got asked
-            # — SF returns more German-audio hits than AL on the same episode.
-            # Resolve ONCE here and hand the result to those sources.
-            #
-            # maja.31: the resolution is a LIST. Sonarr sends TheXEM's scene
-            # absolute number, which restarts per season on many anime — Slime's
-            # "17" is S01E17 through S04E17. Picking one silently made season 1
-            # the answer to every such request. Sources that fetch whole series
-            # and filter locally get the full set and can accept any of them;
-            # sources that bake season/episode into their query get the best
-            # single candidate. Fail-open: an empty list is the old behaviour.
+            # Maja fork: an absolute-numbered request (episode, no season) maps to
+            # one or MORE (season, episode) pairs — Sonarr's scene absolute number
+            # restarts per season on many anime, so "17" may be S01E17..S04E17.
+            # Picking one silently made season 1 the answer to every such request.
+            # Sources that fetch whole series and filter locally get the full set;
+            # sources that bake season/episode into their query get the best single
+            # candidate. Fail-open: an empty list is the old behaviour.
             absolute_candidates = []
             if imdb_id and episode and not season:
                 from quasarr.providers.sonarr_api import resolve_absolute_candidates
@@ -192,11 +156,13 @@ def get_search_results(
                 absolute_candidates = resolve_absolute_candidates(
                     shared_state, imdb_id, episode
                 )
-
             for source in sources.values():
                 source_logger = get_source_logger(source.initials)
 
-                if not config.get(source.initials):
+                if not (
+                    getattr(source, "custom_hostname", None)
+                    or config.get(source.initials)
+                ):
                     source_logger.trace("Hostname missing in config")
                     continue
 
@@ -220,19 +186,14 @@ def get_search_results(
                 source_pairs = None
 
                 if episode and not season:
-                    if absolute_candidates:
-                        # Every source that can weigh alternatives gets them —
-                        # AL/AT included, so their season-specific search
-                        # variants ("Staffel 4") exist at all. Without a season
-                        # they fall back to the plain title, which is the show's
-                        # main page and therefore season 1.
-                        if getattr(source, "supports_candidate_pairs", False):
-                            # Tuple, nicht Liste: die kwargs landen im
-                            # Cache-Schluessel (frozenset(kwargs.items())) und
-                            # muessen hashbar sein.
-                            source_pairs = tuple(
-                                tuple(pair) for pair in absolute_candidates
-                            )
+                    if absolute_candidates and getattr(
+                        source, "supports_candidate_pairs", False
+                    ):
+                        # Tuple, not list: the kwargs land in the cache key
+                        # (frozenset(kwargs.items())) and must be hashable.
+                        source_pairs = tuple(
+                            tuple(pair) for pair in absolute_candidates
+                        )
                     if not source.supports_absolute_numbering:
                         if not absolute_candidates:
                             source_logger.trace(
@@ -286,7 +247,10 @@ def get_search_results(
             for source in sources.values():
                 source_logger = get_source_logger(source.initials)
 
-                if not config.get(source.initials):
+                if not (
+                    getattr(source, "custom_hostname", None)
+                    or config.get(source.initials)
+                ):
                     source_logger.trace("Hostname missing in config")
                     continue
 
@@ -326,7 +290,9 @@ def get_search_results(
         for source in sources.values():
             source_logger = get_source_logger(source.initials)
 
-            if not config.get(source.initials):
+            if not (
+                getattr(source, "custom_hostname", None) or config.get(source.initials)
+            ):
                 source_logger.trace("Hostname missing in config")
                 continue
 
@@ -347,7 +313,7 @@ def get_search_results(
                 args,
                 kwargs,
                 use_cache=True,
-                ttl=FEED_CACHE_TTL_SECONDS,
+                ttl=60,
                 action="feed",
                 cache_category=cache_key_category,
             )
@@ -386,11 +352,12 @@ def get_search_results(
         )
     results = filtered_results
 
-    # Maja fork: drop releases whose language claim the delivered files already
-    # disproved. Without this the ledger would be a diary — the dedupe key is
-    # the link, the link never changes, so the same release would be offered,
-    # grabbed and discarded again on the next pass. This is the half that
-    # actually breaks the circle.
+    # Maja fork (regrab-loop D2): drop releases whose claim the delivered files
+    # already disproved, or that no source could resolve. Without this filter the
+    # ledger would be a diary — the dedupe key is the link, the link never changes,
+    # so the same release would be offered, grabbed and discarded again next pass.
+    # This is the half that actually breaks the circle. Fail-open: a broken ledger
+    # must never make a search return nothing.
     try:
         from quasarr.identity import refusals
 
@@ -401,7 +368,6 @@ def get_search_results(
                 f"(claim disproved by the delivered files)"
             )
     except Exception as e:
-        # Fail open: a broken ledger must never make a search return nothing.
         debug(f"Refusal filter skipped: {e}")
 
     # Calculate pagination for logging and return
@@ -554,33 +520,8 @@ class SearchExecutor:
                         )
                         continue
 
-                    # Single-flight: if another request is already crawling this exact
-                    # (source, action, category) key, adopt its future instead of
-                    # crawling everything a second time. Overlapping *arr retries used
-                    # to double the load on every slow feed — and the deadline above
-                    # makes those retries MORE likely, not less, because a source that
-                    # misses the deadline is absent from the response the client sees.
-                    future = None
-                    adopted = False
-                    if use_cache:
-                        with _inflight_lock:
-                            running = _inflight_futures.get(key)
-                            if running is not None and not running.done():
-                                future = running
-                                adopted = True
-                    if adopted:
-                        get_source_logger(source_name).debug(
-                            "Adopting in-flight crawl instead of starting a duplicate"
-                        )
-                    else:
-                        future = executor.submit(func)
-                        if use_cache:
-                            with _inflight_lock:
-                                _inflight_futures[key] = future
-                            future.add_done_callback(_make_inflight_cleanup(key))
-
-                    # The crawl owner writes the cache; adopters only read the result.
-                    cache_meta = (key, ttl) if (use_cache and not adopted) else None
+                    future = executor.submit(func)
+                    cache_meta = (key, ttl) if use_cache else None
                     future_to_meta[future] = (current_index, cache_meta, source_name)
                     pending_futures.append(future)
                     current_index += 1
@@ -629,7 +570,7 @@ class SearchExecutor:
                             collect(future)
                             continue
 
-                        index, cache_meta, source_name = future_to_meta[future]
+                        index, _, source_name = future_to_meta[future]
                         results_badges[index] = (
                             f"<bg yellow><black>{source_name.upper()}</black></bg yellow>"
                         )
@@ -637,16 +578,6 @@ class SearchExecutor:
                             f"Dropped from this response after "
                             f"{SEARCH_FANOUT_DEADLINE_SECONDS}s"
                         )
-                        # Dropped from THIS response, but not thrown away: the crawl
-                        # keeps running and writes its result to the cache, so the
-                        # next request serves it instantly. Without this a source
-                        # that is reliably slower than the deadline (AL: 66-73s vs
-                        # 60s) would never reach the client at all — it would be
-                        # dropped on every single request, forever.
-                        if cache_meta:
-                            future.add_done_callback(
-                                _make_late_cache_writer(cache_meta, source_name)
-                            )
 
             if results_badges or skipped_badges:
                 bar_str = f" [{' '.join(results_badges + skipped_badges)}]"
@@ -654,37 +585,6 @@ class SearchExecutor:
             executor.shutdown(wait=False, cancel_futures=True)
 
         return results, bar_str, all_cached, min_ttl
-
-
-# In-flight registry for single-flight crawls, keyed like the search cache.
-_inflight_lock = Lock()
-_inflight_futures = {}
-
-
-def _make_inflight_cleanup(key):
-    def _cleanup(future):
-        with _inflight_lock:
-            if _inflight_futures.get(key) is future:
-                del _inflight_futures[key]
-
-    return _cleanup
-
-
-def _make_late_cache_writer(cache_meta, source_name):
-    cache_key, cache_ttl = cache_meta
-
-    def _write(future):
-        try:
-            res = future.result()
-        except Exception as e:
-            get_source_logger(source_name).warn(f"Late search error: {e}")
-            return
-        search_cache.set(cache_key, res, ttl=cache_ttl)
-        get_source_logger(source_name).debug(
-            "Late result cached after response budget"
-        )
-
-    return _write
 
 
 class SearchCache:

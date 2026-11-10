@@ -16,7 +16,7 @@ Retries), nicht im Fork.
   `4.7.3-maja.42`: AL-Zeilenbeschriftungen gelten auch für die Fork-Prüfung `_tab_offers_episode`).
 - Sicherheitsfixes, CI-Pflege und Abhängigkeits-Pins, ohne die ein Rebuild bricht.
 
-Aktueller Upstream-Stand: **`5.3.0-maja.50`** (2026-11-05).
+Aktueller Upstream-Stand: **`6.0.0-maja.51`** (2026-11-10, v6-Re-Port).
 
 **Upstream-MAJORS sind keine Automatik (seit 2026-11-10).** Ein neuer Major verschiebt oft genau
 die Pfade, auf denen die ~20 maja-Verhaltens-Patches sitzen — das ist ein Projekt-Re-Port, keine
@@ -24,10 +24,11 @@ Konfliktlösung im Vorbeigehen. Der Auto-Rebase-Workflow hält einen neuen Major
 **Major-Guard** zurück (`action=hold`: kein Branch, kein Issue, nur Log) und rebaset nur noch
 innerhalb des aktuellen Majors automatisch. Der Guard hebt sich selbst auf, sobald ein Port
 `maja/main` auf den neuen Major hebt.
-- **v6.0.0** (2026-11-08, Neuschreibung sites→templates + Config/DB-Migration) läuft als Projekt
-  auf Branch `maja/port-v6` (Tracking-Issue in diesem Repo; maja-hq `registry/update-constraints.yaml`
-  + `followups.yaml#quasarr-v6-port`). Das Image bleibt bis zum grünen Port-PR + Rufus-gated Deploy
-  auf `5.3.0-maja.50`.
+- **v6.0.0** (2026-11-08, Neuschreibung sites→templates + Config/DB-Migration) wurde als Projekt
+  re-portet (#49, Branch `maja/port-v6` → #50): die gesamte maja-unique Logik (async-accept,
+  ban-parking, Regrab-Loop D1/D2/D3, MX, cloudflare-Cap, AL-Anime-Numbering) auf die
+  Template-Architektur umgezogen, test-first (volle Suite grün). Fork-Version `6.0.0-maja.51`.
+  Der Live-Deploy (Config/DB-Migration + Probe-Batch) bleibt Rufus-gated.
 
 **Was nicht mehr passiert:**
 - Verhaltens-Fixes für neue Fehlerformen (Numbering, Sprach-Flags, Regrab-Schleifen, …).

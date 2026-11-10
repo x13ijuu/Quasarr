@@ -5,6 +5,9 @@ from quasarr.search.sources.helpers.search_release import SearchRelease
 
 
 class AbstractSearchSource(ABC):
+    # Set only by user-defined sources, whose hostname is not in Quasarr.ini.
+    custom_hostname = None
+
     @property
     @abstractmethod
     def initials(self) -> str:
@@ -32,18 +35,6 @@ class AbstractSearchSource(ABC):
 
     @property
     def supports_date_numbering(self) -> bool:
-        return False
-
-    @property
-    def supports_candidate_pairs(self) -> bool:
-        """The source accepts an ``accepted_pairs`` list of (season, episode).
-
-        Maja fork: TheXEM's scene absolute numbering restarts per season on many
-        anime, so one absolute number can mean several seasons. Sources that
-        fetch a whole series and filter locally can weigh every candidate at no
-        extra request; sources that bake season/episode into their query cannot
-        and keep receiving the single best pair.
-        """
         return False
 
     @property

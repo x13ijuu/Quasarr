@@ -14,8 +14,8 @@ from bottle import request
 
 from quasarr.constants import SEARCH_FANOUT_DEADLINE_SECONDS
 from quasarr.downloads import enqueue_grab
-from quasarr.downloads.packages import delete_package, get_packages
 from quasarr.identity import first_seen
+from quasarr.downloads.packages import delete_package, get_packages
 from quasarr.providers import shared_state
 from quasarr.providers.auth import require_api_key
 from quasarr.providers.log import debug, error, info, warn
@@ -227,13 +227,13 @@ def setup_arr_routes(app):
                         return {"status": False, "nzo_ids": [], "quasarr_error": True}
 
                     nzo_ids = []
-                    info(f"Queuing download for <y>{parsed_payload['title']}</y>")
-
                     # Async accept (Maja fork): persist + return the nzo_id INSTANTLY
                     # like real SABnzbd. The background waiting_worker does the actual
                     # scrape/CAPTCHA/JD-add, so a burst of grabs never blocks Sonarr's
                     # client requests (which caused timeouts -> dropped tracking ->
                     # orphaned completed downloads).
+                    info(f"Queuing download for <y>{parsed_payload['title']}</y>")
+
                     downloaded = enqueue_grab(
                         shared_state,
                         request_from,
@@ -253,7 +253,7 @@ def setup_arr_routes(app):
                         return {"status": True, "nzo_ids": nzo_ids}
                     except KeyError:
                         error(
-                            f'Failed to download "{parsed_payload["title"]}" - no package_id returned'
+                            f'Failed to queue "{parsed_payload["title"]}" - no package_id returned'
                         )
                         return {"status": True, "nzo_ids": [], "quasarr_error": True}
 
@@ -443,12 +443,7 @@ def setup_arr_routes(app):
                                 f"<r>{removed_duplicates}</r> duplicate entries filtered"
                             )
 
-                        # Slice by fetch_limit, not the client limit: *arr apps send
-                        # limit=100 but never paginate (offset is always 0), so slicing
-                        # by `limit` silently discarded ~90% of an already-crawled feed.
-                        # The single-category path returns everything unsliced — this
-                        # keeps both paths consistent.
-                        return deduped_results[offset : offset + fetch_limit]
+                        return deduped_results[offset : offset + limit]
 
                     if mode in ["movie", "tvsearch"]:
                         imdb_id = getattr(request.query, "imdbid", "")
@@ -551,22 +546,14 @@ def setup_arr_routes(app):
                         # Get publication date - sources should provide valid dates
                         pub_date = release.get("date", "").strip()
                         if not pub_date:
-                            # A source that states no date used to get "now",
-                            # which means a NEW date on every poll. Sonarr
-                            # matches usenet releases against its blocklist on
-                            # publication date, so a moving date makes the
-                            # blocklist structurally unable to hold that
-                            # release: it is grabbed, it fails, it is
-                            # blocklisted, and the next sync offers it again as
-                            # something never seen before. Measured 2026-08-31
-                            # on AL - 29 grabs of One Piece E1176 in seven
-                            # hours against 29 blocklist rows, none of which
-                            # ever matched.
-                            #
-                            # This is the choke point every source passes
-                            # through, so anchoring here covers all of them:
-                            # the first sighting is remembered and served from
-                            # then on.
+                            # Maja fork: a source that states no date used to get "now" —
+                            # a NEW date on every poll. Sonarr matches releases against its
+                            # blocklist by publication date, so a moving date makes the
+                            # blocklist structurally unable to hold a release: grabbed ->
+                            # failed -> blocklisted -> offered again next sync as unseen.
+                            # (Measured 2026-08-31: 29 grabs of One Piece E1176 in 7h vs 29
+                            # blocklist rows, none ever matched.) Anchor at this choke point
+                            # so the first sighting is remembered and served from then on.
                             pub_date = first_seen.anchor(
                                 release.get("hostname", ""),
                                 source,

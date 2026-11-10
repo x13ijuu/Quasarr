@@ -29,8 +29,8 @@ from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
-from quasarr.downloads.sources import al as al_download
-from quasarr.downloads.sources.al import (
+from quasarr.search.sources.templates.al import download as al_download
+from quasarr.search.sources.templates.al.download import (
     _check_release,
     _episode_link_count,
     _iter_download_tabs,

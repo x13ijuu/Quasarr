@@ -22,7 +22,7 @@ Rule: keep the notes title only when it NAMES the requested episode.
 """
 import unittest
 
-from quasarr.downloads.sources.al import notes_title_identifies_episode
+from quasarr.search.sources.templates.al.download import notes_title_identifies_episode
 
 MEGA = (
     "One.Piece.E001-206.GerSub.480p.AAC.Web-DL.x264-TanukiOne.Piece."

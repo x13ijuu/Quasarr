@@ -38,7 +38,7 @@ from quasarr.providers.sonarr_api import (
     resolve_absolute_candidates,
     resolve_scene_numbering,
 )
-from quasarr.search.sources import al as al_search
+from quasarr.search.sources.templates.al import search as al_search
 
 HOST = "al.invalid"
 SERIES_URL = f"https://www.{HOST}/media/synthetic-show"
@@ -300,7 +300,7 @@ class TheBackstopIsWiredForEverySourceTests(_StateBackedTest):
             downloads,
             "get_download_sources",
             return_value={source_key: self._EmptySource()},
-        ), patch.object(downloads, "find_existing_package", return_value=None):
+        ), patch.object(downloads, "package_id_exists", return_value=False):
             return downloads.download(
                 shared_state_module,
                 request_from="Sonarr/4.0",

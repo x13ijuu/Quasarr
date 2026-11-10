@@ -6,6 +6,7 @@ import html
 import json
 import re
 import socket
+import string
 import sys
 import traceback
 import unicodedata
@@ -921,6 +922,52 @@ def extract_client_type(request_from):
     return client
 
 
+_RAW_TEXT_TAGS = (
+    "script",
+    "style",
+    "textarea",
+    "title",
+    "xmp",
+    "iframe",
+    "noembed",
+    "noframes",
+    "noscript",
+    "plaintext",
+)
+# matched against lowercased markup
+_OPENER_REGEX = re.compile(
+    r"<!--|<!\[cdata\[|<(?:" + "|".join(_RAW_TEXT_TAGS) + r")(?=[\s/>])"
+)
+_OPENER_CLOSERS = {"<!--": "-->", "<![cdata[": "]]>"}
+# str.lower() may change the length of non-ASCII text and misplace the matches
+_ASCII_LOWERCASE = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def escape_unclosed_openers(markup):
+    """Escape comment and raw-text openers that are not closed before the next one.
+
+    Page texts (the random banner on every page, release descriptions) may carry
+    raw markup. A stray opener in one of them would turn the rest of the page
+    into plain text and hide every release and link after it.
+    """
+    lowered = markup.translate(_ASCII_LOWERCASE)
+    pieces = []
+    position = 0
+    while match := _OPENER_REGEX.search(lowered, position):
+        opener = match.group(0)
+        closer = _OPENER_CLOSERS.get(opener, f"</{opener[1:]}")
+        end = lowered.find(closer, match.end())
+        next_opener = lowered.find(opener, match.end())
+        if end == -1 or -1 < next_opener < end:
+            pieces.append(markup[position : match.start()] + "&lt;")
+            position = match.start() + 1
+        else:
+            pieces.append(markup[position : end + len(closer)])
+            position = end + len(closer)
+    pieces.append(markup[position:])
+    return "".join(pieces)
+
+
 def convert_to_mb(item):
     size = float(item["size"])
     unit = item["sizeunit"].upper()
@@ -1051,32 +1098,7 @@ def normalize_optional_int(value):
         return None
 
 
-def match_in_title(
-    title: str,
-    season: int = None,
-    episode: int = None,
-    accepted_pairs=None,
-) -> bool:
-    """True when ``title`` carries the requested season/episode.
-
-    Maja fork: ``accepted_pairs`` is an optional list of ``(season, episode)``
-    tuples that are ALSO acceptable. It exists because Sonarr sends TheXEM's
-    scene absolute number, which restarts per season on many anime — one number
-    can legitimately mean several seasons, and pinning the first one made
-    season 1 the answer to every such request. A title matching any candidate is
-    a hit; Sonarr's own matcher then decides which release it actually wants.
-    """
-    if accepted_pairs:
-        return any(
-            _match_single_pair_in_title(title, pair_season, pair_episode)
-            for pair_season, pair_episode in accepted_pairs
-        )
-    return _match_single_pair_in_title(title, season, episode)
-
-
-def _match_single_pair_in_title(
-    title: str, season: int = None, episode: int = None
-) -> bool:
+def match_in_title(title: str, season: int = None, episode: int = None) -> bool:
     season = normalize_optional_int(season)
     episode = normalize_optional_int(episode)
 
@@ -1308,7 +1330,6 @@ def is_valid_release(
     season: int = None,
     episode: int = None,
     episode_date: date = None,
-    accepted_pairs=None,
 ) -> bool:
     """
     Return True if the given release title is valid for the given search parameters.
@@ -1318,9 +1339,6 @@ def is_valid_release(
     - season: desired season number (or None)
     - episode: desired episode number (or None)
     - episode_date: validated date for a date-numbered TV episode (or None)
-    - accepted_pairs: Maja fork — further (season, episode) pairs that are also
-      acceptable, because Sonarr's scene absolute number can mean several
-      seasons at once (see match_in_title)
     """
     try:
         cat_id = int(search_category)
@@ -1380,17 +1398,14 @@ def is_valid_release(
                 )
                 return False
             # if caller specified a season or episode, double‑check the match
-            if season is not None or episode is not None or accepted_pairs:
-                if not match_in_title(
-                    title, season, episode, accepted_pairs=accepted_pairs
-                ):
+            if season is not None or episode is not None:
+                if not match_in_title(title, season, episode):
                     trace(
                         "Skipping {title!r} as it doesn't match season "
-                        "{season} and episode {episode} (candidates: {pairs})",
+                        "{season} and episode {episode}",
                         title=title,
                         season=season,
                         episode=episode,
-                        pairs=accepted_pairs,
                     )
                     return False
             return True
