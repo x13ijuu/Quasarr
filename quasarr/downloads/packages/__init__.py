@@ -3,7 +3,6 @@
 # Project by https://github.com/rix1337
 
 import json
-import os
 import time
 import traceback
 from collections import defaultdict
@@ -23,68 +22,6 @@ from quasarr.storage.categories import get_download_category_from_package_id
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
-
-
-def completed_destination():
-    """
-    Opt-in final download directory (Maja fork, F5). When COMPLETED_DIR is set,
-    a package counts as truly "Completed" only once its folder actually exists
-    there — i.e. after an external mover has moved it from the downloader's
-    working dir to the shared destination. Unset -> upstream behaviour (a package
-    is Completed as soon as the downloader reports it finished).
-    """
-    d = os.environ.get("COMPLETED_DIR", "").strip()
-    return d or None
-
-
-def package_at_destination(save_to, completed_dir):
-    """
-    True if the package folder (basename of the downloader's saveTo) exists under
-    completed_dir. Returns (present, final_path).
-    """
-    if not save_to or not completed_dir:
-        return False, None
-    dirname = os.path.basename(save_to.rstrip("/"))
-    if not dirname:
-        return False, None
-    final_path = os.path.join(completed_dir, dirname)
-    return os.path.isdir(final_path), final_path
-
-
-def downloader_working_dir():
-    """
-    Opt-in root of the downloader's working directory as seen from THIS process
-    (Maja fork, F5b). Must point at the same tree the downloader writes to
-    (e.g. JDownloader's /staging bind-mounted read-only into this container).
-    Unset -> the source-gone check is disabled.
-    """
-    d = os.environ.get("DOWNLOADER_WORKING_DIR", "").strip().rstrip("/")
-    return d or None
-
-
-def package_source_gone(save_to):
-    """
-    True only when we can PROVE the downloader's working copy of the package is
-    gone: DOWNLOADER_WORKING_DIR is configured, visible on this filesystem,
-    save_to lies inside it, and the package folder is missing or holds no files.
-    Anything unknown (unset env, unmounted dir, foreign path) returns False so a
-    finished package conservatively stays "Moving" — exactly the pre-F5b behaviour.
-    """
-    root = downloader_working_dir()
-    if not root or not save_to:
-        return False
-    save_to = save_to.rstrip("/")
-    if save_to == root or not save_to.startswith(root + "/"):
-        return False
-    if not os.path.isdir(root):
-        # Working dir not visible here (mount missing) -> cannot judge.
-        return False
-    if not os.path.isdir(save_to):
-        return True
-    for _dirpath, _dirnames, filenames in os.walk(save_to):
-        if filenames:
-            return False
-    return True
 
 
 def is_extraction_complete(status):
@@ -155,9 +92,6 @@ def get_links_status(package, all_links, is_archive=False):
         - offline_mirror_linkids: list - offline link UUIDs to clean up (online mirror exists)
         - not_downloadable_linkids: list - "not downloadable" link UUIDs to remove by id (online mirror exists)
         - file_error_linkids: list - file-error (statusIconKey "false") link UUIDs to remove by id (online mirror exists)
-        - filenames: list - Maja fork: the REAL names JDownloader reports for the
-          links. The only place the delivered content is visible; the refusal
-          ledger compares them against what the release title claimed.
     """
     package_uuid = package.get("uuid")
     package_name = package.get("name", "unknown")
@@ -355,9 +289,6 @@ def get_links_status(package, all_links, is_archive=False):
         "offline_mirror_linkids": offline_mirror_linkids,
         "not_downloadable_linkids": not_downloadable_linkids,
         "file_error_linkids": file_error_linkids,
-        "filenames": [
-            link.get("name") for link in links_in_package if link.get("name")
-        ],
     }
 
 
@@ -599,79 +530,6 @@ def get_packages(shared_state, _cache=None, auto_start=True):
             error = link_details["error"]
             finished = link_details["all_finished"]
 
-            # Maja fork: the one moment where claim and reality are both in
-            # scope. If the delivery disproves the title's audio claim, the
-            # release is refused for good — that is the only thing that breaks
-            # the grab/import/discard/regrab circle, because Sonarr sees each
-            # pass as a success and will happily repeat it forever (measured:
-            # S04E19, 93 grabs in 14 days).
-            #
-            # The CLAIM is the advertised title from the grab note, NOT
-            # `package_name`. A source that re-guesses the title from its
-            # details page (AL does) hands JDownloader the CORRECTED name, so by
-            # the time we get here the German claim is already gone and every
-            # comparison came out clean — the ledger stayed empty through 74
-            # further grabs of one episode on 2026-08-30 while the loop ran.
-            #
-            # That correction is itself evidence, and the strongest we have: the
-            # delivered files often name no audio language at all, while the
-            # re-guessed name is the source's own reading of its details page.
-            # So both are weighed — advertised claim against everything the
-            # download actually turned out to be.
-            if finished and not error:
-                try:
-                    from quasarr.identity import refusals
-
-                    grab = refusals.recall_grab(comment)
-                    # Only sources that carry their language flags on the
-                    # release BLOCK make a title a claim worth disproving.
-                    # Elsewhere a title states what it names, and a mismatch
-                    # against a filename is far more likely to be Dual-Audio or
-                    # a sample than a lie - so the comparison stays out of it
-                    # rather than risk banning a release for good. Before this
-                    # it ran on every finished package, films included.
-                    claim_source = refusals.advertises_block_language(
-                        (grab or {}).get("source_key")
-                    )
-                    advertised = (grab or {}).get("title") or package_name
-                    delivered_evidence = list(link_details.get("filenames") or [])
-                    if package_name and package_name != advertised:
-                        # Only a CORRECTED name is evidence. An untouched one is
-                        # the claim itself, and letting the claim vouch for
-                        # itself would clear every package on rule 3.
-                        delivered_evidence.insert(0, package_name)
-                    contradiction = (
-                        refusals.language_contradiction(
-                            advertised, delivered_evidence
-                        )
-                        if claim_source
-                        else None
-                    )
-                    if contradiction:
-                        claimed, delivered = contradiction
-                        if grab:
-                            refusals.record_refusal(
-                                grab.get("source_key"),
-                                grab.get("url"),
-                                advertised,
-                                claimed,
-                                delivered,
-                                package_id=comment,
-                            )
-                        else:
-                            # Without the note we cannot name the release, and a
-                            # refusal we cannot name is one we could never lift.
-                            # Log it and let it go.
-                            debug(
-                                f"'{advertised}' claimed "
-                                f"{'/'.join(sorted(claimed))} but delivered "
-                                f"{'/'.join(sorted(delivered))} — no grab note "
-                                f"for {comment}, not refusing"
-                            )
-                except Exception as e:
-                    # Never let bookkeeping break a finished download.
-                    debug(f"Refusal check failed for '{package_name}': {e}")
-
             # Links can go offline, flip to "Not downloadable!", or hit a file
             # error after auto-start, while they sit in the downloader list. The
             # linkgrabber's DELETE_OFFLINE cleanup never runs here, so remove all
@@ -719,42 +577,11 @@ def get_packages(shared_state, _cache=None, auto_start=True):
             if not finished and link_details["eta"]:
                 package["eta"] = link_details["eta"]
 
-            # F5 (Maja fork): a finished download is only honestly "Completed" once its
-            # files are actually at the shared destination. Upstream reports Completed as
-            # soon as the downloader finishes — but here the files still sit on the
-            # downloader's working disk until an external mover relocates them, so Sonarr
-            # would try to import from a path that isn't populated yet. When COMPLETED_DIR
-            # is set and the folder is not there yet, keep the package in the queue with a
-            # "Moving" status instead of flipping it to Completed history.
-            moving = False
-            final_storage = None
-            completed_dir = completed_destination()
-            if finished and not error and completed_dir:
-                present, final_path = package_at_destination(
-                    package.get("saveTo", ""), completed_dir
-                )
-                if present:
-                    final_storage = final_path  # report the real, importable path
-                elif package_source_gone(package.get("saveTo", "")):
-                    # F5b: source files are gone from the downloader's working dir
-                    # AND the destination copy is gone too -> the mover moved them,
-                    # the *arr imported, and cleanup removed the folder. The cycle
-                    # is over; report Completed (history) instead of keeping an
-                    # immortal "Moving" zombie in the queue.
-                    trace(
-                        f"Package '{package_name}' finished, gone from working dir "
-                        f"and destination -> treating as Completed (F5b)"
-                    )
-                else:
-                    moving = True  # finished downloading, not yet at destination
-
-            location = (
-                "queue" if moving else ("history" if error or finished else "queue")
-            )
+            location = "history" if error or finished else "queue"
 
             trace(
                 f"Package '{package_name}' -> location={location}, "
-                f"finished={finished}, error={error}, is_archive={is_archive}, moving={moving}"
+                f"finished={finished}, error={error}, is_archive={is_archive}"
             )
 
             packages.append(
@@ -767,8 +594,6 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                     "error": error,
                     "is_archive": is_archive,
                     "extraction_ok": finished and is_archive,
-                    "moving": moving,
-                    "final_storage": final_storage,
                 }
             )
 
@@ -792,7 +617,6 @@ def get_packages(shared_state, _cache=None, auto_start=True):
         if package["location"] == "queue":
             time_left = "23:59:59"
             storage = ""
-            slot_status = "Downloading"  # F5: overridden per branch below
 
             if package["type"] == "linkgrabber":
                 details = package["details"]
@@ -831,12 +655,6 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                     if mb_left == 0:
                         status = "Extracting"
 
-                # F5: finished-but-not-yet-at-destination -> honest "Moving" state.
-                if package.get("moving"):
-                    status = "Moving"
-                    time_left = "0:00:00"
-
-                slot_status = status  # F5: honest per-package status (was hardcoded)
                 name = f"[{status}] {details.get('name', 'unknown')}"
                 package_id = package["comment"]
                 category = get_download_category_from_package_id(package_id)
@@ -862,10 +680,6 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                 except (ZeroDivisionError, ValueError, TypeError):
                     percentage = 0
 
-                # F5 (Maja fork): emit the actually-computed slot status instead of a
-                # hardcoded "Downloading". SABnzbd statuses like Paused/Extracting/Moving
-                # are all "in progress, don't import yet" to Sonarr, so this stays safe
-                # while giving honest visibility. linkgrabber/protected keep the default.
                 downloads["queue"].append(
                     {
                         "index": queue_index,
@@ -876,7 +690,7 @@ def get_packages(shared_state, _cache=None, auto_start=True):
                         "mbleft": int(float(mb_left)) if mb_left else 0,
                         "mb": int(float(mb)) if mb else 0,
                         "bytes": bytes_total,
-                        "status": slot_status,  # F5: was hardcoded "Downloading"
+                        "status": "Downloading",
                         "percentage": percentage,
                         "timeleft": time_left,
                         "type": package_type,
@@ -900,11 +714,6 @@ def get_packages(shared_state, _cache=None, auto_start=True):
             except (KeyError, TypeError, ValueError):
                 size = 0
             storage = details.get("saveTo", "/")
-            # F5 (Maja fork): when the package has reached COMPLETED_DIR, report that
-            # final, importable path instead of the downloader's working dir. This makes
-            # the storage Sonarr imports from correct without a remote-path mapping.
-            if package.get("final_storage"):
-                storage = package["final_storage"]
 
             package_id = package.get("comment")
             # Use package_id if available, otherwise use uuid as fallback for non-Quasarr packages
@@ -952,57 +761,6 @@ def get_packages(shared_state, _cache=None, auto_start=True):
             history_index += 1
         else:
             info(f"Invalid package location {package['location']}")
-
-    # === QUEUED / WAITING PACKAGES (Maja fork) ===
-    # Two kinds of DB-parked grabs, both rendered as SABnzbd "Queued" slots (Sonarr
-    # treats Queued as in-progress: never imports, never fails, never blocklists — so
-    # it keeps tracking the nzo_id reliably, which is the whole point):
-    #   * pending  — freshly enqueued by async addurl, worker is about to fetch it
-    #                -> "[Fetching] <title>"
-    #   * waiting  — host banned, worker retries after the (learned) unban
-    #                -> "[Waiting for unban: AL] <title>" with a countdown
-    # mbleft is kept > 0 so the slot reads as real pending work, not a stalled 0-byte
-    # item that Sonarr's no-progress heuristics might flag.
-    try:
-        from quasarr.providers import host_bans
-
-        waiting = host_bans.all_waiting()
-        if waiting:
-            now = time.time()
-            banned = host_bans.get_banned_hosts(now)
-            for package_id, ctx in waiting:
-                src = (ctx.get("source_key") or "?").upper()
-                mb = int(ctx.get("size_mb") or 0) or 1
-                state = banned.get((ctx.get("source_key") or "").lower())
-                if state and state.get("retry_after") and not ctx.get("pending"):
-                    secs_left = max(0, int(state["retry_after"] - now))
-                    name = f"[Waiting for unban: {src}] {ctx.get('title', 'unknown')}"
-                    timeleft = format_eta(secs_left)
-                else:
-                    name = f"[Fetching] {ctx.get('title', 'unknown')}"
-                    timeleft = "0:10:00"
-                downloads["queue"].append(
-                    {
-                        "index": queue_index,
-                        "nzo_id": package_id,
-                        "priority": "Normal",
-                        "filename": name,
-                        "cat": get_download_category_from_package_id(package_id),
-                        "mbleft": mb,
-                        "mb": mb,
-                        "bytes": int(mb) * 1024 * 1024,
-                        "status": "Queued",
-                        "percentage": 0,
-                        "timeleft": timeleft,
-                        "type": "waiting",
-                        "uuid": None,
-                        "is_archive": False,
-                        "storage": "",
-                    }
-                )
-                queue_index += 1
-    except Exception as e:
-        debug(f"Failed to render waiting packages: {e}")
 
     # === AUTO-START QUASARR PACKAGES ===
     if auto_start and not linkgrabber_collecting:
@@ -1107,103 +865,11 @@ def get_packages(shared_state, _cache=None, auto_start=True):
     return downloads
 
 
-def run_history_hygiene(shared_state):
-    """
-    F5b (Maja fork): remove Completed history entries whose final folder is gone.
-
-    In-product replacement for the external reconcile_quasarr_history guard. With the
-    honest-Completed path check (F5), a package is only Completed once its folder
-    exists under COMPLETED_DIR; once an importer has picked it up and the external
-    cleanup (hardlink-verified) has removed the folder, that Completed entry would
-    otherwise linger forever and drive the "path does not exist" import loop. The
-    folder's disappearance IS the grace signal — cleanup only removes imported
-    folders — so no timestamp bookkeeping is needed.
-
-    No-op unless COMPLETED_DIR is set (upstream behaviour).
-
-    The reported `storage` cannot be used to decide this. It only points at
-    COMPLETED_DIR while the folder still EXISTS there (see the final_storage
-    branch in get_packages); the moment cleanup removes it, storage falls back
-    to the downloader's working dir. Filtering on
-    `storage.startswith(completed_dir)` therefore excluded exactly the entries
-    this function exists to remove - the trigger condition and the exclusion
-    condition were the same event, so the entry lingered forever and Sonarr kept
-    an unclosable queue item ("No files found are eligible for import").
-    Observed live 2026-08-20 on a One Piece package.
-
-    So judge by the filesystem instead, from either storage shape: not at the
-    destination AND provably gone from the working dir. package_source_gone()
-    keeps the 2026-07-07 reconcile race shut - it returns False for anything it
-    cannot prove (unset env, unmounted dir, foreign path, folder still holding
-    files), so a package that is merely mid-move is never touched.
-    """
-    completed_dir = completed_destination()
-    if not completed_dir:
-        return 0
-    try:
-        packages = get_packages(shared_state, auto_start=False)
-    except Exception as e:
-        debug(f"history hygiene: get_packages failed: {e}")
-        return 0
-    removed = 0
-    for item in packages.get("history", []) or []:
-        if item.get("status") != "Completed":
-            continue
-        storage = item.get("storage") or ""
-        if not storage:
-            continue
-        present, final_path = package_at_destination(storage, completed_dir)
-        if present:
-            # Still waiting to be imported (or imported but not cleaned up yet).
-            continue
-
-        root = completed_dir.rstrip("/")
-        if storage == root or storage.startswith(root + "/"):
-            # Storage already names the destination, so its absence is the whole
-            # signal (the pre-existing behaviour, kept as-is).
-            if os.path.isdir(storage):
-                continue
-        elif not package_source_gone(storage):
-            # Storage names the downloader's working dir - or something we do not
-            # recognise. Only act when the working copy is PROVABLY gone; anything
-            # unprovable stays untouched. This is the 2026-07-07 race guard.
-            continue
-
-        pid = item.get("nzo_id")
-        if pid:
-            debug(
-                f"history hygiene: removing completed {pid} "
-                f"(gone from {final_path} and from the working dir)"
-            )
-            try:
-                delete_package(shared_state, pid, missing_ok=True)
-                removed += 1
-            except Exception as e:
-                debug(f"history hygiene: delete {pid} failed: {e}")
-    if removed:
-        info(
-            f"history hygiene: removed {removed} completed entr{'y' if removed == 1 else 'ies'} (imported + cleaned up)"
-        )
-    return removed
-
-
 def delete_package(shared_state, package_id, package_title=None, missing_ok=False):
     """Delete a package from JDownloader and/or the database."""
     debug(
         f"delete_package: Starting deletion of package {package_id} (title: {package_title})"
     )
-
-    # F3 (Maja fork): a "waiting for unban" package exists only in the waiting DB —
-    # there is no JD package to remove. Handle it before touching JDownloader.
-    try:
-        from quasarr.providers import host_bans
-
-        if host_bans.get_waiting(package_id):
-            host_bans.delete_waiting(package_id)
-            info(f"Deleted waiting (host-banned) package {package_id}")
-            return True
-    except Exception as e:
-        debug(f"waiting-package delete check failed: {e}")
 
     try:
         # Create cache for this single delete operation

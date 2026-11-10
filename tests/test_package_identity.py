@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from quasarr.downloads import download, generate_deterministic_package_id
-from quasarr.downloads.sources.wx import Source as WxSource
+from quasarr.search.sources.templates.wx.download import Source as WxSource
 
 
 class PackageIdentityTests(unittest.TestCase):
@@ -148,9 +148,6 @@ class PackageIdentityTests(unittest.TestCase):
             patch("quasarr.downloads.clear_hostname_issue"),
             patch("quasarr.downloads.mark_hostname_issue"),
             patch("quasarr.downloads.package_id_exists", return_value=False),
-            # Maja fork: download() dedupes via find_existing_package() (it must tell
-            # a stale "failed" marker from a real duplicate), not package_id_exists().
-            patch("quasarr.downloads.find_existing_package", return_value=None),
             patch(
                 "quasarr.downloads.fail", return_value={"success": True, "failed": True}
             ),
@@ -203,9 +200,6 @@ class PackageIdentityTests(unittest.TestCase):
                 return_value={"links": [], "error": "synthetic", "terminal": True},
             ) as get_links,
             patch("quasarr.downloads.package_id_exists", return_value=False),
-            # Maja fork: download() dedupes via find_existing_package() (it must tell
-            # a stale "failed" marker from a real duplicate), not package_id_exists().
-            patch("quasarr.downloads.find_existing_package", return_value=None),
             patch(
                 "quasarr.downloads.fail", return_value={"success": True, "failed": True}
             ),

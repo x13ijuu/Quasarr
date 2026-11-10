@@ -13,9 +13,8 @@ from xml.etree import ElementTree
 from bottle import request
 
 from quasarr.constants import SEARCH_FANOUT_DEADLINE_SECONDS
-from quasarr.downloads import enqueue_grab
+from quasarr.downloads import download
 from quasarr.downloads.packages import delete_package, get_packages
-from quasarr.identity import first_seen
 from quasarr.providers import shared_state
 from quasarr.providers.auth import require_api_key
 from quasarr.providers.log import debug, error, info, warn
@@ -120,15 +119,9 @@ def setup_arr_routes(app):
             category_param = getattr(request.query, "cat", None)
             download_category = determine_category(request_from, category_param)
 
-            # Async accept (Maja fork): Sonarr/Radarr use SABnzbd's addfile (this NZB
-            # upload), NOT addurl. enqueue_grab persists the grab and returns the nzo_id
-            # INSTANTLY; the background waiting_worker does the scrape/CAPTCHA/JD-add. A
-            # burst of grabs therefore never blocks Sonarr's client requests (which
-            # caused 15-40s hangs -> timeouts / downloadClientUnavailable -> Sonarr
-            # dropped the tracking -> orphaned completed downloads that never imported).
-            info(f"Queuing download for <y>{title}</y>")
+            info(f"Attempting download for <y>{title}</y>")
             try:
-                downloaded = enqueue_grab(
+                downloaded = download(
                     shared_state,
                     request_from,
                     download_category,
@@ -140,14 +133,28 @@ def setup_arr_routes(app):
                     source_key,
                 )
             except Exception as e:
-                error(f"Failed to queue <y>{title}</y>: {e}")
-                continue
+                if type(e).__name__ == "TokenExpiredException":
+                    warn(
+                        f"Download failed for <y>{title}</y>: MyJDownloader token expired."
+                    )
+                    continue
+                raise e
             try:
+                success = downloaded["success"]
                 package_id = downloaded["package_id"]
-                title = downloaded.get("title", title)
+                title = downloaded["title"]
+                failed = downloaded.get("failed", False)
+
+                if success and not failed:
+                    info(f"<y>{title}</y> added successfully!")
+                else:
+                    warn(
+                        f"<y>{title}</y> added as failed package! See log for details."
+                    )
+
                 nzo_ids.append(package_id)
             except KeyError:
-                info(f"Failed to queue <y>{title}</y> - no package_id returned")
+                error(f"Failed to download <y>{title}</y> - no package_id returned")
 
         response = {"status": True, "nzo_ids": nzo_ids}
         if not nzo_ids:
@@ -227,14 +234,9 @@ def setup_arr_routes(app):
                         return {"status": False, "nzo_ids": [], "quasarr_error": True}
 
                     nzo_ids = []
-                    info(f"Queuing download for <y>{parsed_payload['title']}</y>")
+                    info(f"Attempting download for <y>{parsed_payload['title']}</y>")
 
-                    # Async accept (Maja fork): persist + return the nzo_id INSTANTLY
-                    # like real SABnzbd. The background waiting_worker does the actual
-                    # scrape/CAPTCHA/JD-add, so a burst of grabs never blocks Sonarr's
-                    # client requests (which caused timeouts -> dropped tracking ->
-                    # orphaned completed downloads).
-                    downloaded = enqueue_grab(
+                    downloaded = download(
                         shared_state,
                         request_from,
                         download_category,
@@ -247,8 +249,18 @@ def setup_arr_routes(app):
                     )
 
                     try:
+                        success = downloaded["success"]
                         package_id = downloaded["package_id"]
                         title = downloaded.get("title", parsed_payload["title"])
+                        failed = downloaded.get("failed", False)
+
+                        if success and not failed:
+                            info(f'"{title} added successfully!')
+                        else:
+                            warn(
+                                f'"{title} added as failed package! See log for details.'
+                            )
+
                         nzo_ids.append(package_id)
                         return {"status": True, "nzo_ids": nzo_ids}
                     except KeyError:
@@ -443,12 +455,7 @@ def setup_arr_routes(app):
                                 f"<r>{removed_duplicates}</r> duplicate entries filtered"
                             )
 
-                        # Slice by fetch_limit, not the client limit: *arr apps send
-                        # limit=100 but never paginate (offset is always 0), so slicing
-                        # by `limit` silently discarded ~90% of an already-crawled feed.
-                        # The single-category path returns everything unsliced — this
-                        # keeps both paths consistent.
-                        return deduped_results[offset : offset + fetch_limit]
+                        return deduped_results[offset : offset + limit]
 
                     if mode in ["movie", "tvsearch"]:
                         imdb_id = getattr(request.query, "imdbid", "")
@@ -551,28 +558,7 @@ def setup_arr_routes(app):
                         # Get publication date - sources should provide valid dates
                         pub_date = release.get("date", "").strip()
                         if not pub_date:
-                            # A source that states no date used to get "now",
-                            # which means a NEW date on every poll. Sonarr
-                            # matches usenet releases against its blocklist on
-                            # publication date, so a moving date makes the
-                            # blocklist structurally unable to hold that
-                            # release: it is grabbed, it fails, it is
-                            # blocklisted, and the next sync offers it again as
-                            # something never seen before. Measured 2026-08-31
-                            # on AL - 29 grabs of One Piece E1176 in seven
-                            # hours against 29 blocklist rows, none of which
-                            # ever matched.
-                            #
-                            # This is the choke point every source passes
-                            # through, so anchoring here covers all of them:
-                            # the first sighting is remembered and served from
-                            # then on.
-                            pub_date = first_seen.anchor(
-                                release.get("hostname", ""),
-                                source,
-                                title,
-                                now_rfc822,
-                            )
+                            pub_date = now_rfc822
 
                         title_xml = _xml_text(title)
                         link_xml = _xml_text(release.get("link", ""))

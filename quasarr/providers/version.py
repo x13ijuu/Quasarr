@@ -5,20 +5,11 @@
 import re
 import sys
 
-__version__ = "5.3.0"
-
-# Fork patch level (x13ijuu/Quasarr). Kept separate from __version__ because
-# _version_key()/hatchling cannot parse PEP-440 local versions ("4.6.2+maja.1").
-# Docker image tags carry the full fork version, e.g. "4.6.2-maja.1".
-MAJA_PATCH_LEVEL = 50
+__version__ = "6.0.0"
 
 
 def get_version():
     return __version__
-
-
-def get_fork_version():
-    return f"{__version__}-maja.{MAJA_PATCH_LEVEL}"
 
 
 def get_latest_version():
@@ -162,7 +153,5 @@ def create_version_file():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--create-version-file":
         create_version_file()
-    elif len(sys.argv) > 1 and sys.argv[1] == "--fork-version":
-        print(get_fork_version())
     else:
         print(get_version())

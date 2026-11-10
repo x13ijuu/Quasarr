@@ -4,8 +4,6 @@
 
 import hashlib
 import json
-import os
-import time
 
 from quasarr.constants import (
     AUTO_DECRYPT_PATTERNS,
@@ -17,15 +15,8 @@ from quasarr.downloads.linkcrypters.hide import decrypt_links_if_hide
 from quasarr.downloads.mirror_filters import filter_final_download_urls
 from quasarr.downloads.packages import get_packages
 from quasarr.downloads.sources import get_sources as get_download_sources
-from quasarr.identity.refusals import record_unresolvable
-from quasarr.providers.host_bans import (
-    HostBannedError,
-    is_banned,
-    park_waiting,
-    record_ban,
-)
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
-from quasarr.providers.log import debug, error, info, warn
+from quasarr.providers.log import error, info, warn
 from quasarr.providers.notifications import (
     send_notification,
     send_tracked_notification,
@@ -51,38 +42,24 @@ from quasarr.storage.categories import (
 
 
 def generate_deterministic_package_id(
-    title, source_key, client_type, download_category, identity=None, nonce=None
+    title, source_key, client_type, download_category, identity=None
 ):
     """
-    Generate a package ID from title, source, and client type.
+    Generate a deterministic package ID from title, source, and client type.
 
-    Without a nonce the ID is DETERMINISTIC — the same title, source, client,
-    category, and optional source identity always yield the same ID (used for
-    internal lookups/tests, and upstream's blocklist semantics).
-
-    With a nonce it is UNIQUE per grab (Maja fork). This is required for the
-    SABnzbd contract: real SAB mints a fresh nzo_id on every add, and Sonarr keys
-    its download tracking by that id. A deterministic id that repeats across grab
-    attempts collides with Sonarr's history — once a release was recorded as
-    downloadFailed under id X, a LATER successful download reusing id X is treated
-    as already-handled and never tracked/imported (proven: E137 2026-07-08). So the
-    live grab path (enqueue_grab) always passes a per-grab nonce.
-
-    The source identity (upstream 4.7.3, e.g. WX release UID + SxxEyy) keeps two
-    grabs of the same title for DIFFERENT episodes apart; the nonce still makes
-    every grab attempt unique on top of it.
+    The same title, source, client, category, and optional source identity produce
+    the same package_id, allowing clients to reliably blocklist erroneous releases.
 
     Args:
         title: Release title (e.g., "Movie.Name.2024.1080p.BluRay")
         source_key: Source identifier/hostname shorthand
-        client_type: Client type without version (e.g., "radarr", "sonarr")
+        client_type: Client type without version (e.g., "radarr", "sonarr", "magazarr")
         download_category: Optional download category override
             (e.g., "movies", "tv", "docs")
         identity: Optional stable source identity; omitted for legacy releases
-        nonce: Optional per-grab uniqueness token. When set, the id is unique.
 
     Returns:
-        Package ID in format: Quasarr_{download_category}_{hash32}
+        Deterministic package ID in format: Quasarr_{download_category}_{hash32}
     """
     # Normalize inputs for consistency
     normalized_title = title.strip()
@@ -98,14 +75,11 @@ def generate_deterministic_package_id(
             normalized_client, "tv"
         )
 
-    # Create hash from combination using SHA256 (+ optional source identity,
-    # + optional per-grab nonce)
+    # Create deterministic hash from combination using SHA256
     normalized_identity = str(identity).strip() if identity else ""
     hash_input = f"{normalized_title}|{normalized_source}|{normalized_client}"
     if normalized_identity:
         hash_input += f"|{normalized_identity}"
-    if nonce is not None:
-        hash_input = f"{hash_input}|{nonce}"
     hash_bytes = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
 
     # Use first 32 characters for good collision resistance (128-bit)
@@ -516,63 +490,12 @@ def process_links(
 # =============================================================================
 
 
-def _park_banned_grab(
-    package_id, source_key, request_from, download_category, title, url,
-    size_mb, password, imdb_id, message="",
-):
-    """
-    Record a host ban and park the full re-download context so the waiting_worker
-    can retry it after the unban. Returns the SAB-style result for download().
-    """
-    record_ban(source_key, message)
-    park_waiting(
-        package_id,
-        {
-            "title": title,
-            "url": url,
-            "size_mb": size_mb,
-            "password": password,
-            "imdb_id": imdb_id,
-            "source_key": source_key,
-            "download_category": download_category,
-            "request_from": request_from,
-            "reason": str(message)[:300],
-        },
-    )
-    info(
-        f'Host "{source_key}" is banned — parked "{title}" to wait for the unban '
-        f"(package {package_id})."
-    )
-    return {
-        "success": True,
-        "package_id": package_id,
-        "title": title,
-        "waiting": True,
-    }
-
-
-def find_existing_package(shared_state, package_id):
-    """
-    Locate where a package_id already exists, if anywhere.
-
-    Returns the source as a string so callers can distinguish a genuine duplicate
-    (currently downloading / already in history / awaiting CAPTCHA) from a stale
-    "failed" marker. A failed marker is NOT a duplicate: it means a previous attempt
-    of this release failed and the client (Sonarr/Radarr) is re-grabbing it — that is
-    a retry request, not a reason to skip.
-
-    Returns one of: "protected", "failed", "queue", "history", or None.
-    """
+def package_id_exists(shared_state, package_id):
+    # DB checks
     if shared_state.get_db("protected").retrieve(package_id):
-        return "protected"
+        return True
     if shared_state.get_db("failed").retrieve(package_id):
-        return "failed"
-
-    # F3 (Maja fork): already parked waiting for a host unban -> genuine duplicate.
-    from quasarr.providers.host_bans import get_waiting
-
-    if get_waiting(package_id):
-        return "waiting"
+        return True
 
     data = (
         shared_state.run_device_request(
@@ -586,78 +509,9 @@ def find_existing_package(shared_state, package_id):
     for section in ("queue", "history"):
         for pkg in data.get(section, []) or []:
             if pkg.get("nzo_id") == package_id:
-                return section
+                return True
 
-    return None
-
-
-def package_id_exists(shared_state, package_id):
-    """Backwards-compatible boolean wrapper around find_existing_package()."""
-    return find_existing_package(shared_state, package_id) is not None
-
-
-def enqueue_grab(
-    shared_state,
-    request_from,
-    download_category,
-    title,
-    url,
-    size_mb,
-    password,
-    imdb_id,
-    source_key,
-):
-    """
-    Async accept path (Maja fork): the SABnzbd contract expects addurl to return
-    a nzo_id INSTANTLY (just queue it). Upstream/our download() instead scrapes +
-    solves the CAPTCHA + adds to JD inline (15-40s) before answering — so a burst
-    of grabs blocks Sonarr's client requests, Sonarr times out / marks the client
-    unavailable and DROPS the tracking, while Quasarr finishes in the background →
-    orphaned completed downloads that never import. (Root cause of Rufus' 'hängt /
-    verschwindet / kein Import' under load; RSS with 1 grab at a time never hit it.)
-
-    enqueue_grab() persists the grab and returns the deterministic nzo_id at once.
-    The waiting_worker processes it (calls download()) in the background, and
-    get_packages() renders it as a 'Fetching'/Queued slot from the first poll on, so
-    Sonarr tracks it reliably the whole time. Dedup and delete reuse the existing
-    waiting-table machinery.
-    """
-    from quasarr.providers.host_bans import park_waiting
-
-    title = normalize_download_title(title)
-    client_type = extract_client_type(request_from)
-    src = (source_key or "").lower().strip() or "unknown"
-
-    # UNIQUE id per grab (SABnzbd contract). Real SAB mints a fresh nzo_id on every
-    # add; Sonarr keys its download tracking by it. A deterministic id that repeats
-    # across grab attempts collides with Sonarr's history: once a release was recorded
-    # as downloadFailed under id X, a later successful download reusing X is treated as
-    # already-handled and never imported (proven live: E137, 2026-07-08). The per-grab
-    # nonce makes every grab a fresh, never-before-seen nzo -> Sonarr tracks it cleanly
-    # through to import. The id stays stable for THIS grab's whole lifecycle (parked
-    # here, reused verbatim by the worker's download()), so all internal keying holds.
-    nonce = f"{time.time():.6f}-{os.urandom(4).hex()}"
-    package_id = generate_deterministic_package_id(
-        title, src, client_type, download_category, nonce=nonce
-    )
-
-    park_waiting(
-        package_id,
-        {
-            "title": title,
-            "url": url,
-            "size_mb": size_mb,
-            "password": password,
-            "imdb_id": imdb_id,
-            "source_key": source_key,
-            "download_category": download_category,
-            "request_from": request_from,
-            "package_id": package_id,
-            "pending": True,
-        },
-    )
-    info(f'Queued "{title}" for background download (package {package_id}).')
-    return {"success": True, "package_id": package_id, "title": title, "queued": True}
+    return False
 
 
 def download(
@@ -670,16 +524,9 @@ def download(
     password,
     imdb_id,
     source_key,
-    package_id=None,
 ):
     """
     Main download entry point.
-
-    package_id (Maja fork): when supplied (by the background worker draining a
-    pending/waiting grab), it is used verbatim so the id the worker processes is the
-    exact unique id enqueue_grab already handed to Sonarr — the id must not be
-    regenerated mid-lifecycle. When None (legacy/direct call), a deterministic id is
-    generated as before.
 
     Args:
         shared_state: Application shared state
@@ -693,8 +540,7 @@ def download(
         source_key: Hostname shorthand from search. If not provided,
                     will be derived from URL matching against configured hostnames.
     """
-    # Upstream resets package_id to None here. The fork must NOT: the worker
-    # passes the pre-minted per-grab id in, and it must survive verbatim.
+    package_id = None
     package_identity = None
     package_identity_source_key = None
     try:
@@ -719,23 +565,6 @@ def download(
         if source_key and isinstance(source_key, str):
             normalized_source_key = source_key.lower().strip()
 
-        # F3 (Maja fork): if the authoritative source is a currently-banned host, do NOT
-        # hit it again — park the grab straight away so we never hammer a banned host
-        # (this is what makes the external hoster-breaker guard unnecessary).
-        if normalized_source_key and is_banned(normalized_source_key):
-            package_id = package_id or generate_deterministic_package_id(
-                title, normalized_source_key, client_type, download_category
-            )
-            if not find_existing_package(shared_state, package_id):
-                return {
-                    "package_id": package_id,
-                    **_park_banned_grab(
-                        package_id, normalized_source_key, request_from,
-                        download_category, title, url, size_mb, password, imdb_id,
-                        "host still banned",
-                    ),
-                }
-
         source_candidates = []
         if normalized_source_key and normalized_source_key in download_sources:
             source_candidates.append(
@@ -748,7 +577,7 @@ def download(
             source_candidates.append((key, source, False))
 
         for key, source, from_source_key in source_candidates:
-            hostname = config.get(key)
+            hostname = getattr(source, "custom_hostname", None) or config.get(key)
             if not from_source_key and not (
                 hostname and hostname.lower() in url.lower()
             ):
@@ -781,21 +610,6 @@ def download(
                     label = key.upper()
                     detected_source_key = key
                     break
-            except HostBannedError as e:
-                # F3 (Maja fork): host rate-limited/banned us. Park the grab and let the
-                # waiting_worker retry after the unban instead of failing it (which would
-                # make the client blocklist the release and keep hammering the host).
-                banned_key = e.source_key or key
-                package_id = package_id or generate_deterministic_package_id(
-                    title, banned_key, client_type, download_category
-                )
-                return {
-                    "package_id": package_id,
-                    **_park_banned_grab(
-                        package_id, banned_key, request_from, download_category,
-                        title, url, size_mb, password, imdb_id, e.message,
-                    ),
-                }
             except Exception as e:
                 info(f"Error getting download links from {key.upper()}: {e}")
                 if not from_source_key or (
@@ -818,8 +632,8 @@ def download(
             source_key or detected_source_key or package_identity_source_key
         )
 
-        # Use the pre-minted per-grab id (worker path) or generate one (direct call)
-        package_id = package_id or generate_deterministic_package_id(
+        # Generate DETERMINISTIC package_id
+        package_id = generate_deterministic_package_id(
             title,
             final_source_key,
             client_type,
@@ -827,62 +641,12 @@ def download(
             identity=package_identity,
         )
 
-        # Maja fork: note who this grab belongs to. When the package finishes, the
-        # only identity in scope is the JD package + its comment (= package_id),
-        # and the package_id carries a per-grab nonce — it cannot lead back to the
-        # RELEASE. Without this note the refusal ledger could not name what it is
-        # refusing. Purely additive and fail-open; nothing downstream depends on it.
-        try:
-            from quasarr.identity import refusals
-
-            refusals.remember_grab(package_id, final_source_key, url, title)
-        except Exception as e:
-            debug(f"Could not remember grab identity for {package_id}: {e}")
-
-        # Decide based on WHERE the package already exists (if anywhere).
-        existing = find_existing_package(shared_state, package_id)
-        if existing == "failed":
-            # Root-cause fix (Maja fork): a "failed" marker is NOT a duplicate. The client
-            # is re-grabbing a release whose previous attempt failed. Upstream skipped here
-            # AND returned success -> the grab was silently swallowed (JD never got it, the
-            # episode stayed missing forever). Clear the stale marker and actually retry.
-            # nzo_id stays deterministic; clients with removeFailedDownloads already dropped
-            # the old failed record, so reusing the id is safe.
-            shared_state.get_db("failed").delete(package_id)
-            info(f"Retrying previously-failed package {package_id} (re-grabbed by client).")
-        elif existing:
-            # Genuine duplicate: currently downloading, already in history, or awaiting a
-            # CAPTCHA solve. Do not add a second copy.
-            info(f"Package {package_id} already exists ({existing}). Skipping duplicate.")
-            return {
-                "success": True,
-                "package_id": package_id,
-                "title": title,
-                "duplicate": True,
-            }
+        # Skip Download if package_id already exists
+        if package_id_exists(shared_state, package_id):
+            warn(f"Package {package_id} already exists. Skipping download!")
+            return {"success": True, "package_id": package_id, "title": title}
 
         if source_result is None:
-            # Every "cannot resolve" path in every source funnels through here:
-            # no source claimed the URL, the claiming source came back empty, or
-            # the page moved on. Up to maja.39 this only failed the grab, so the
-            # next feed offered the release again and the client grabbed it
-            # again — 29 times in seven hours for One Piece E1176 on 2026-08-31.
-            #
-            # maja.39 recorded the refusal, but it hooked the AL source instead
-            # of this funnel, so it only ever covered one of 22 sources. Found on
-            # 2026-08-31 on Mayans M.C. S05: the identical failure against
-            # scnlog.me, entirely unguarded. Recording it HERE is what makes the
-            # backstop match the failure.
-            #
-            # Soft, with a backoff: "not resolvable" is usually temporary at any
-            # source, so the release comes back on its own instead of being
-            # banned.
-            record_unresolvable(
-                normalized_source_key or detected_source_key,
-                url,
-                title,
-                "no source could resolve this release",
-            )
             result = fail(
                 title,
                 package_id,
@@ -914,7 +678,7 @@ def download(
 
             final_source_key = source_key or package_identity_source_key or "unknown"
 
-            package_id = package_id or generate_deterministic_package_id(
+            package_id = generate_deterministic_package_id(
                 title,
                 final_source_key,
                 client_type,
@@ -924,34 +688,6 @@ def download(
 
         result = fail(title, package_id, shared_state, reason=f"Unexpected error: {e}")
         return {"package_id": package_id, **result}
-
-
-def retry_waiting_package(shared_state, package_id):
-    """
-    Re-attempt a package parked while its host was banned. Removes the waiting row
-    first so the dedupe check doesn't treat it as a duplicate, then runs the normal
-    download() with the stored context. Returns the download() result (which may
-    park it again if the host is still banned).
-    """
-    from quasarr.providers.host_bans import delete_waiting, get_waiting
-
-    ctx = get_waiting(package_id)
-    if not ctx:
-        return None
-    delete_waiting(package_id)
-    return download(
-        shared_state,
-        ctx.get("request_from", ""),
-        ctx.get("download_category"),
-        ctx.get("title"),
-        ctx.get("url"),
-        ctx.get("size_mb"),
-        ctx.get("password"),
-        ctx.get("imdb_id"),
-        ctx.get("source_key"),
-        # reuse the exact unique id enqueue_grab minted (never regenerate mid-lifecycle)
-        package_id=ctx.get("package_id") or package_id,
-    )
 
 
 def fail(title, package_id, shared_state, reason="Unknown error"):
