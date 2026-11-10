@@ -14,6 +14,7 @@ from bottle import request
 
 from quasarr.constants import SEARCH_FANOUT_DEADLINE_SECONDS
 from quasarr.downloads import enqueue_grab
+from quasarr.identity import first_seen
 from quasarr.downloads.packages import delete_package, get_packages
 from quasarr.providers import shared_state
 from quasarr.providers.auth import require_api_key
@@ -545,7 +546,20 @@ def setup_arr_routes(app):
                         # Get publication date - sources should provide valid dates
                         pub_date = release.get("date", "").strip()
                         if not pub_date:
-                            pub_date = now_rfc822
+                            # Maja fork: a source that states no date used to get "now" —
+                            # a NEW date on every poll. Sonarr matches releases against its
+                            # blocklist by publication date, so a moving date makes the
+                            # blocklist structurally unable to hold a release: grabbed ->
+                            # failed -> blocklisted -> offered again next sync as unseen.
+                            # (Measured 2026-08-31: 29 grabs of One Piece E1176 in 7h vs 29
+                            # blocklist rows, none ever matched.) Anchor at this choke point
+                            # so the first sighting is remembered and served from then on.
+                            pub_date = first_seen.anchor(
+                                release.get("hostname", ""),
+                                source,
+                                title,
+                                now_rfc822,
+                            )
 
                         title_xml = _xml_text(title)
                         link_xml = _xml_text(release.get("link", ""))
