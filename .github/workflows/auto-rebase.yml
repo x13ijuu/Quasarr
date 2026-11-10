@@ -51,8 +51,25 @@ jobs:
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
           echo "upver=$upver"   >> "$GITHUB_OUTPUT"
           echo "cur=$cur"       >> "$GITHUB_OUTPUT"
-          if [ "$upver" = "$cur" ]; then echo "action=none" >> "$GITHUB_OUTPUT";
-          else echo "action=rebase" >> "$GITHUB_OUTPUT"; fi
+          up_major="${upver%%.*}"
+          cur_major="${cur%%.*}"
+          if [ "$upver" = "$cur" ]; then
+            echo "action=none" >> "$GITHUB_OUTPUT"
+          elif [ "${up_major:-0}" -gt "${cur_major:-0}" ] 2>/dev/null; then
+            # Major-Guard (maja-hq ADR 0034/0036): ein neuer Upstream-MAJOR ist eine
+            # Projekt-Entscheidung — die ~20 maja-Verhaltens-Patches muessen re-portet werden,
+            # kein automatischer Merge. Fruher lief der Merge in den Konflikt, pushte einen
+            # Branch und legte das "auto-rebase braucht Hand"-Issue an: der Lauf war gruen, der
+            # Pfad aber blockiert (maja-hq update-path-watch kardete das taeglich). Der Guard
+            # beendet diesen stillen Churn: KEIN Branch, KEIN Issue, nur ein sichtbarer Log-
+            # Hinweis. Er hebt sich SELBST auf, sobald der Port maja/main auf den neuen Major
+            # hebt (dann up_major == cur_major und within-Major-Rebase laeuft wieder). Within-
+            # Major (minor/patch) bleibt voll automatisch.
+            echo "::notice::Upstream-Major $up_major ($latest) > Fork-Major $cur_major ($cur) — HOLD. Neuer Major = Projekt-Re-Port (maja-hq ADR 0034/0036), kein Auto-Rebase. Kein Branch, kein Issue."
+            echo "action=hold" >> "$GITHUB_OUTPUT"
+          else
+            echo "action=rebase" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Merge upstream + bump patch level
         id: merge

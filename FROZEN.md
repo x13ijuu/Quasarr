@@ -10,13 +10,24 @@ mit Code nicht abschließbar. Der Hebel liegt im Betriebsmodus (Sonarr ohne eige
 Retries), nicht im Fork.
 
 **Was noch passiert:**
-- Upstream-Rebases über die Auto-Rebase-Pipeline (`.github/workflows/`), damit das Image nicht
-  hinter `rix1337/Quasarr` zurückfällt. Konfliktlösungen dürfen Upstream-Verhalten in die
-  Fork-Pfade nachziehen, wenn beide sonst widersprechen (Beispiel `4.7.3-maja.42`: AL-
-  Zeilenbeschriftungen gelten auch für die Fork-Prüfung `_tab_offers_episode`).
+- Upstream-Rebases über die Auto-Rebase-Pipeline (`.github/workflows/`) **innerhalb desselben
+  Majors**, damit das Image nicht hinter `rix1337/Quasarr` zurückfällt. Konfliktlösungen dürfen
+  Upstream-Verhalten in die Fork-Pfade nachziehen, wenn beide sonst widersprechen (Beispiel
+  `4.7.3-maja.42`: AL-Zeilenbeschriftungen gelten auch für die Fork-Prüfung `_tab_offers_episode`).
 - Sicherheitsfixes, CI-Pflege und Abhängigkeits-Pins, ohne die ein Rebuild bricht.
 
-Aktueller Upstream-Stand: **`4.7.7-maja.43`** (2026-10-24).
+Aktueller Upstream-Stand: **`5.3.0-maja.50`** (2026-11-05).
+
+**Upstream-MAJORS sind keine Automatik (seit 2026-11-10).** Ein neuer Major verschiebt oft genau
+die Pfade, auf denen die ~20 maja-Verhaltens-Patches sitzen — das ist ein Projekt-Re-Port, keine
+Konfliktlösung im Vorbeigehen. Der Auto-Rebase-Workflow hält einen neuen Major deshalb per
+**Major-Guard** zurück (`action=hold`: kein Branch, kein Issue, nur Log) und rebaset nur noch
+innerhalb des aktuellen Majors automatisch. Der Guard hebt sich selbst auf, sobald ein Port
+`maja/main` auf den neuen Major hebt.
+- **v6.0.0** (2026-11-08, Neuschreibung sites→templates + Config/DB-Migration) läuft als Projekt
+  auf Branch `maja/port-v6` (Tracking-Issue in diesem Repo; maja-hq `registry/update-constraints.yaml`
+  + `followups.yaml#quasarr-v6-port`). Das Image bleibt bis zum grünen Port-PR + Rufus-gated Deploy
+  auf `5.3.0-maja.50`.
 
 **Was nicht mehr passiert:**
 - Verhaltens-Fixes für neue Fehlerformen (Numbering, Sprach-Flags, Regrab-Schleifen, …).
