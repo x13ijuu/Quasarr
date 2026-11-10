@@ -14,6 +14,8 @@ from bs4 import BeautifulSoup
 from quasarr.constants import DOWNLOAD_REQUEST_TIMEOUT_SECONDS
 from quasarr.downloads.linkcrypters.al import decrypt_content, solve_captcha
 from quasarr.downloads.sources.helpers.abstract_source import AbstractDownloadSource
+from quasarr.identity.refusals import audio_languages
+from quasarr.providers.utils import normalize_optional_int
 from quasarr.downloads.sources.helpers.anime_title import (
     ReleaseInfo,
 )
@@ -497,8 +499,13 @@ def _extract_season_number_from_title(page_title, release_type, release_title=""
                     if season_candidate >= 2:
                         season_num = season_candidate
 
-            if season_num is None:
-                season_num = 1
+            # Maja fork (F4): do NOT default to season 1. When a series release has no
+            # real season evidence (no SxxEyy in the release title, no "Staffel/Season N"
+            # or trailing >=2 in the page title), it is absolutely numbered — inventing
+            # S01 turned e.g. absolute E57 into "S01E57" (really S03E16), which broke the
+            # Sonarr import with a folder-name conflict. Returning None makes
+            # guess_release_title emit the correct absolute "Series.Name.E57", which
+            # Sonarr's anime parser maps to the right season/episode itself.
 
     return season_num
 
@@ -833,26 +840,78 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
     release_id = _normalize_release_id(release_id)
 
     if release_id == 0:
-        info(
-            "Feed download detected, hard-coding release_id to 1 to achieve successful download"
-        )
-        release_id = 1
-        # The following logic works, but the highest release ID sometimes does not have the desired episode
+        # Maja fork: feed grabs carry no usable tab id. _get_release_id() only
+        # finds one when the feed block literally says "Release N:", so RSS
+        # entries arrive here as 0.
         #
-        # If download was started from the feed, the highest download id is typically the best option
-        # panes = soup.find_all("div", class_="tab-pane")
-        # max_id = None
-        # for pane in panes:
-        #     pane_id = pane.get("id", "")
-        #     match = re.match(r"download_(\d+)$", pane_id)
-        #     if match:
-        #         num = int(match.group(1))
-        #         if max_id is None or num > max_id:
-        #             max_id = num
-        # if max_id:
-        #     release_id = max_id
+        # Upstream then hard-coded tab 1 "to achieve successful download" -
+        # success meaning "something downloaded", not "the ordered thing". On a
+        # page whose first tab is a batch collection that is simply the wrong
+        # release. Proven live 2026-08-20: four One Piece episodes (abs 1169,
+        # 1170, 1171, 1174) were each grabbed from RSS as
+        # "…German.ML.GerSub.EngSub.1080p.WEB-DL" and each came back as a 720p
+        # japanese-audio CR.WEB file off tab 1. All four RSS grabs were wrong;
+        # none of the three search-path grabs (which carry a real tab id) were.
+        #
+        # Resolve it honestly instead: the grabbed title is known, so find the
+        # tab that actually carries it.
+        #
+        # When the title match comes up empty, ask the second question: which
+        # tab carries the AUDIO the title advertises and offers this episode?
+        # That is the same question the search path answers by carrying a real
+        # tab id, and it is the one tab 1 got wrong every time.
+        #
+        # Only when the title advertises nothing to match on do we still fall
+        # back to tab 1 - the feed builds its title from less data than the
+        # details page, and refusing a grab we cannot judge would break feed
+        # grabs that work today (the Bleach RSS grabs on 2026-08-20 03:42/03:43
+        # landed correctly this way). A claim we CAN judge and cannot satisfy is
+        # refused: better no episode than the wrong one, the same rule maja.19
+        # and maja.25 already follow.
+        matched = _resolve_release_id_by_title(soup, title)
+        if not matched:
+            matched = _resolve_release_id_by_audio(soup, title, episode_in_title)
+        if matched:
+            release_id = matched
+        elif audio_languages(title):
+            info(
+                f'Refusing feed grab "{title}": no release carries the '
+                "advertised audio for this episode - tab 1 would be a guess"
+            )
+            return title, 0
+        else:
+            release_id = 1
+            info(f'Feed grab "{title}": nothing to match on, falling back to release 1')
 
     tab = soup.find("div", class_="tab-pane", id=f"download_{release_id}")
+
+    # Maja fork: the episode is picked POSITIONALLY - get_download_links() sends
+    # `selection = episode_in_title - 1` as an index into this tab's
+    # `div.episodes a[data-loop]` list. That is only meaningful when the tab
+    # numbers its episodes from 1. For an absolutely numbered grab ("E1174")
+    # against a ranged batch tab it is nonsense (index 1173), and for "S00E01"
+    # it silently resolves to the first link of a main-season tab - the Solo
+    # Leveling case, which maja.25 documented but did not prevent.
+    #
+    # Since 4.7.3 the index comes from the row labels where they exist
+    # (_resolve_episode_selection), and _tab_offers_episode reads the same
+    # labels. Without a usable label we still cannot know the tab's own episode
+    # offset, so refuse rather than fetch an arbitrary link.
+    if tab is not None and episode_in_title:
+        # Same correction as on the search side: ask whether the LINK EXISTS,
+        # not whether the number fits the count. The count version refused
+        # One Piece E1174 (loop 1173 present, but 1174 > 1173 links) and would
+        # have stopped the series entirely instead of only stopping wrong grabs.
+        offers = _tab_offers_episode(tab, episode_in_title)
+        if offers is False:
+            available = _episode_link_count(tab)
+            info(
+                f'Refusing "{title}": release {release_id} has no link for '
+                f"episode {episode_in_title} (offers {available} episode link(s), "
+                "data-loop is 0-based) - the link index would be arbitrary"
+            )
+            return title, 0
+
     if tab:
         try:
             # We re-guess the title from the details page
@@ -876,7 +935,12 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
             )
             real_title = release_info.release_title
             if real_title:
-                if real_title.lower() != title.lower():
+                if not details_title_overrides_grabbed(title, real_title):
+                    info(
+                        f'Keeping grabbed title "{title}" — details page claims a '
+                        f'different season ("{real_title}", AL cour numbering)'
+                    )
+                elif real_title.lower() != title.lower():
                     info(
                         f'Identified true release title "{real_title}" on details page'
                     )
@@ -886,8 +950,34 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
                 if episode_in_title:
                     release_info.episode_min = int(episode_in_title)
                     release_info.episode_max = int(episode_in_title)
+                    # Maja fork (F4): the grabbed title is absolutely numbered when it
+                    # carries no season token (e.g. "Bleach.E113"). In that case never
+                    # fabricate a season — a mis-detected S01 (from synonyms/notes) turns
+                    # E113 into "S01E113", which conflicts with the real SxxEyy inside the
+                    # release and breaks Sonarr's auto-import (folder-name check). Keep it
+                    # absolute so Sonarr's anime parser maps it itself.
+                    if not re.search(r"(?i)\bS\d{1,4}(?:E\d{1,4})?\b", title):
+                        release_info.season = None
 
                 guessed_title = _guess_title(page_title, release_info)
+                # Maja fork (season 0): unlike the release-notes branch above,
+                # this one had NO season-conflict guard. The guess describes the
+                # exact tab+link selection we are about to fetch, so a season
+                # that contradicts the grabbed title means the bytes are not what
+                # was asked for - renaming to the guess imports the wrong episode
+                # under a plausible name, keeping the grabbed name imports it
+                # under a lying one. Neither is acceptable: refuse the grab.
+                # (Live 2026-08-19: "…S00E01…-DK" was silently rewritten to
+                # "…S01E01…-DK" and delivered season-1 files.)
+                if guessed_title and not details_title_overrides_grabbed(
+                    title, guessed_title
+                ):
+                    info(
+                        f'Refusing download of "{title}": the details page '
+                        f'resolves this release to "{guessed_title}" - the '
+                        "seasons contradict each other"
+                    )
+                    return title, 0
                 if guessed_title and guessed_title.lower() != title.lower():
                     info(
                         f'Adjusted guessed release title to "{guessed_title}" from details page'
@@ -953,3 +1043,328 @@ def _extract_episode(title: str) -> int | None:
             return int(match.group(1))
 
     return None
+
+
+# =============================================================================
+# Maja fork: anime-numbering refinements (arc/season-0, episode-link membership,
+# feed-tab resolution). Additive helpers; wired into _check_release below.
+# =============================================================================
+
+def apply_arc_season(release_info: ReleaseInfo, season, season_specific_match: bool):
+    """Maja fork (arc-numbering): stamp the requested season onto an arc release.
+
+    anime-loads ships later arcs (Bleach "Thousand-Year Blood War" = TVDB S17,
+    InuYasha "The Final Act" = TVDB S7) under their own title, numbered relative
+    to the arc and WITHOUT a season marker ("Bleach.E14"). F4's absolute path then
+    emits "Bleach.E14", which Sonarr maps E14 -> absolute 14 -> S01E14 (an episode
+    that already exists) and rejects with "Episode wasn't requested".
+
+    When the release was found via a season-specific search variant (Sonarr's
+    "Staffel N" query or the TheXEM arc name) we KNOW the page is exactly that
+    arc, so we stamp the requested season and drop the raw arc title. The rebuilt
+    guess ("Bleach.S17E14...") carries the season, and Sonarr's scene mapping for
+    the arc resolves it to the right episode.
+
+    Second case, same damage from the other side: the release notes may carry a
+    title whose OWN season number is the site's cour count rather than the show's
+    season ("Bleach.Thousand-Year.Blood.War.S03E14" is AL's third TYBW cour, i.e.
+    TVDB S17E14). The release is already correctly attributed to season 17, but
+    Sonarr believes the title and mapped it onto S03E14 — an episode that exists,
+    so a good file would have been overwritten (caught live 2026-07-27). Whenever
+    the title's embedded season contradicts the season we resolved, the title is
+    dropped and rebuilt truthfully.
+
+    Mutates and returns release_info. No-op without a requested season, and for
+    titles/parses that already agree with it.
+
+    Season 0 (specials) is a REQUESTED season like any other - guarding with
+    truthiness made specials skip the conflict check below, which is how a
+    S00E01 request came back with S01 content (live 2026-08-19).
+    """
+    requested = normalize_optional_int(season)
+    if requested is None:
+        return release_info
+
+    # A title claiming a DIFFERENT season is cour-relative numbering we cannot
+    # translate: AL splits long arcs into parts and numbers them as seasons, so
+    # "…Blood.War.S03E14" is part 3 episode 14 — TVDB S17E40, NOT S17E14.
+    # Renaming it to the requested season (what maja.17 did) would import the
+    # wrong episode under the right name. Without a proven part offset the only
+    # safe answer is to drop the release; the caller skips it.
+    if title_season_conflicts(release_info.release_title, requested):
+        return None
+
+    if season_specific_match and release_info.season != requested:
+        release_info.season = requested
+        # Title carries no season claim (absolute style) -> rebuild it WITH the
+        # season from the already-parsed components (audio/subs/quality/group).
+        release_info.release_title = None
+
+    return release_info
+
+
+def title_season(release_title):
+    """Return the season a title claims via an explicit ``S<NN>`` token, else None."""
+    if not release_title:
+        return None
+    match = re.search(r"(?:^|\.)S(\d{1,4})(?:E\d{1,4})?", release_title, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def title_season_conflicts(release_title, season):
+    """True when a release title carries an S-number other than ``season``.
+
+    Only an explicit ``S<NN>`` token counts; absolutely numbered titles
+    ("Bleach.E14") carry no season claim and must stay untouched (F4).
+    """
+    claimed = title_season(release_title)
+    if claimed is None:
+        return False
+    return claimed != int(season)
+
+
+def details_title_overrides_grabbed(grabbed_title, details_title):
+    """False when the details page contradicts the season we already grabbed.
+
+    The download path re-reads the release page and normally prefers the "true"
+    title found there. But AL numbers arc cours as seasons of their own, so the
+    details page of TVDB S17E14 says "…Blood.War.S03E14". Taking that over the
+    grabbed title made Sonarr re-map the download onto S03E14 — an episode that
+    exists, i.e. a good file would have been overwritten (caught live
+    2026-07-27; the search path got the same treatment in maja.17).
+
+    Only an explicit season disagreement blocks the override; everything else
+    (added group tags, corrected resolution, absolute titles) still wins.
+    """
+    grabbed_season = title_season(grabbed_title)
+    if grabbed_season is None:
+        return True
+    return not title_season_conflicts(details_title, grabbed_season)
+
+
+def _iter_download_tabs(soup):
+    """Yield (dom_id_number, tab) for every download tab, by its REAL DOM id.
+
+    The search path numbers tabs positionally (1..N in document order) while the
+    download path looks them up as ``id="download_<n>"``. Those two only agree
+    when the site happens to emit a gapless, in-order set. Reading the id back
+    off the element keeps this side honest regardless.
+    """
+    for tab in soup.select("div.tab-pane[id^=download_]"):
+        match = re.match(r"download_(\d+)$", tab.get("id", ""))
+        if match:
+            yield int(match.group(1)), tab
+
+
+def _tab_audio_languages(tab):
+    """The audio languages this tab advertises, read off its speaker-row flags."""
+    return [
+        {"jp": "Japanese", "de": "German", "en": "English"}.get(code, code.title())
+        for code in (
+            icon["class"][1].replace("flag-", "")
+            # Same form as upstream 4.7.7: soupsieve 3 rejects complex selectors
+            # inside :has(), so the header cell is matched and its sibling read.
+            for icon in tab.select("th:has(> i.fa-volume-up) ~ td i.flag")
+        )
+    ]
+
+
+def _episode_loops(tab):
+    """The data-loop values a tab offers, as a set of ints.
+
+    AL numbers these 0-BASED and prefixes the list with a non-numeric "cnl"
+    entry (Click'n'Load, the whole release). So episode N lives at data-loop
+    N-1, and the number of links is NOT the highest episode number.
+    """
+    episodes_div = tab.find("div", class_="episodes")
+    if not episodes_div:
+        return None
+    return {
+        int(a["data-loop"])
+        for a in episodes_div.find_all("a", attrs={"data-loop": re.compile(r"^\d+$")})
+    }
+
+
+def _tab_offers_episode(tab, episode):
+    """True when this tab actually carries a link for ``episode``.
+
+    Replaces the old `episode <= len(links)` test, which conflated a COUNT with
+    a NUMBERING and was off by one. Measured live 2026-08-20 on One Piece:
+    1174 data-loop links, of which 1 is "cnl" -> 1173 numeric, values 0..1173.
+    Episode 1174 lives at loop 1173 and is present, but `1174 <= 1173` is false,
+    so every AL release was discarded and targeted searches returned NOTHING.
+    E1120 still worked (1120 <= 1173) — which is exactly the pattern seen in
+    Sonarr's history: searches found E1120 in August, E1174 never.
+    """
+    loops = _episode_loops(tab)
+    if loops is None:
+        return None  # tab has no per-episode list — caller decides
+    try:
+        ep = int(episode)
+    except (TypeError, ValueError):
+        return None
+    # Row labels first (upstream 4.7.3, #449/#453): a row says which episodes it
+    # holds ("003 Episode 080-081: Title"). Position arithmetic is wrong for a
+    # release that does not start at episode 1 - one covering E080-120 offers
+    # loops 0..40, so E30 would "exist" at loop 29 and fetch E109 - and for
+    # merged double episodes. Only when the rows carry no usable label does the
+    # 0-based arithmetic below decide, exactly as before.
+    ranges = _episode_row_ranges(tab)
+    if ranges and any(first <= ep <= last for first, last in ranges):
+        return True
+    if ranges and len(ranges) == len(loops):
+        return False  # every row is labeled and none holds the episode
+    return (ep - 1) in loops
+
+
+# Row label right after the row number, e.g. "003 Episode 001-002: Title".
+# Anchored so episode titles like "Chikara - Episode 1" are not mistaken for it
+# (same pattern as upstream's _resolve_episode_selection).
+_EPISODE_ROW_LABEL = re.compile(r"\d+\s+Episode\s+(\d+)(?:\s*-\s*(\d+))?(?=\s*:|\s*$)")
+
+
+def _episode_row_ranges(tab):
+    """(first, last) episode numbers of every labeled row in this tab.
+
+    Empty when no row carries a parseable label, None when the tab has no
+    per-episode list at all.
+    """
+    episodes_div = tab.find("div", class_="episodes")
+    if not episodes_div:
+        return None
+    ranges = []
+    for row in episodes_div.find_all("a", attrs={"data-loop": re.compile(r"^\d+$")}):
+        match = _EPISODE_ROW_LABEL.match(row.get_text(" ", strip=True))
+        if match:
+            first = int(match.group(1))
+            last = int(match.group(2)) if match.group(2) else first
+            ranges.append((first, last))
+    return ranges
+
+
+def _episode_link_count(tab):
+    """How many episode links this tab offers, or None when it has no list."""
+    episodes_div = tab.find("div", class_="episodes")
+    if not episodes_div:
+        return None
+    return len(episodes_div.find_all("a", attrs={"data-loop": re.compile(r"^\d+$")}))
+
+
+def _resolve_release_id_by_audio(soup, title, episode):
+    """Return the tab id whose AUDIO matches what ``title`` advertises, or 0.
+
+    The second way to answer "which release was meant" when a feed grab carries
+    no tab id and the title match came up empty. A details page can list the
+    same episode under several releases that differ only in audio - one
+    original-language, one dubbed - and the feed advertises the dubbed one while
+    the page's first tab is usually the other.
+
+    Measured 2026-08-30 on a still-airing season: the dub existed for episodes
+    1-17 on release 2, the feed advertised German for episode 20, and tab 1
+    (original audio only) was taken for all of them. Episode 17 was obtainable
+    in German the whole time and still came back with the wrong audio 20 times;
+    the manual search path, which carries a real tab id, fetched it correctly on
+    the first try.
+
+    Both halves are required: the tab must carry the advertised audio AND offer
+    the episode. A season whose dub trails the sub has tabs that satisfy one but
+    not the other, and taking either alone puts the wrong file on disk under the
+    right name.
+    """
+    claimed = audio_languages(title)
+    if not claimed:
+        return 0  # nothing was advertised, so there is nothing to match on
+
+    candidates = []
+    for tab_id, tab in _iter_download_tabs(soup):
+        if not claimed & set(_tab_audio_languages(tab)):
+            continue
+        if episode and _tab_offers_episode(tab, episode) is False:
+            continue
+        candidates.append(tab_id)
+
+    if len(candidates) == 1:
+        info(
+            f'Resolved feed grab "{title}" to release {candidates[0]} by audio '
+            f"({'/'.join(sorted(claimed))})"
+        )
+        return candidates[0]
+
+    return 0
+
+
+
+
+def notes_title_identifies_episode(notes_title, episode) -> bool:
+    """True when a release-notes title names the episode that was requested.
+
+    AL's notes sometimes carry a COLLECTION name instead of a per-episode one,
+    e.g. "One.Piece.E001-206.GerSub.480p…207-1100…E1101-XXX…". Passing that
+    through verbatim gives Sonarr nothing to map — it answered "Unknown Series"
+    and rejected the release (live 2026-08-20, after the episode-link fix had
+    already made the release show up again).
+
+    Nothing requested -> the notes title is fine as-is (season packs, feeds).
+    """
+    if not episode:
+        return True
+    try:
+        wanted = int(episode)
+    except (TypeError, ValueError):
+        return True
+    return _extract_episode(notes_title or "") == wanted
+
+
+def _resolve_release_id_by_title(soup, title):
+    """Return the tab id whose own title matches ``title``, or 0 when unclear.
+
+    Used for feed grabs, which carry no tab id. Matching is done on the title we
+    already committed to when the release was offered to Sonarr - the one piece
+    of information that is known rather than guessed.
+    """
+    if not title:
+        return 0
+
+    try:
+        page_title_info = soup.find("title").text.strip().rpartition(" (")
+        page_title = page_title_info[0].strip()
+        release_type = (
+            "series" if "serie" in page_title_info[2].strip().lower() else "movie"
+        )
+    except Exception:
+        return 0
+
+    wanted = title.strip().lower()
+    matches = []
+    for tab_id, tab in _iter_download_tabs(soup):
+        try:
+            info_for_tab = _parse_info_from_download_item(
+                tab,
+                soup,
+                page_title=page_title,
+                release_type=release_type,
+                requested_season=release_type == "series",
+                requested_episode=None,
+            )
+        except Exception:
+            continue
+        candidates = {
+            (info_for_tab.release_title or "").strip().lower(),
+            (_guess_title(page_title, info_for_tab) or "").strip().lower(),
+        }
+        candidates.discard("")
+        if wanted in candidates:
+            matches.append(tab_id)
+
+    if len(matches) == 1:
+        info(f'Resolved feed grab "{title}" to release {matches[0]} by title match')
+        return matches[0]
+
+    info(
+        f'Refusing feed grab "{title}": {"no" if not matches else len(matches)} '
+        "tabs on the details page carry this title - cannot tell which release "
+        "was meant"
+    )
+    return 0
+
+
