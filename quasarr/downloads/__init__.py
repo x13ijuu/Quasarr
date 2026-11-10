@@ -4,6 +4,8 @@
 
 import hashlib
 import json
+import os
+import time
 
 from quasarr.constants import (
     AUTO_DECRYPT_PATTERNS,
@@ -42,13 +44,22 @@ from quasarr.storage.categories import (
 
 
 def generate_deterministic_package_id(
-    title, source_key, client_type, download_category, identity=None
+    title, source_key, client_type, download_category, identity=None, nonce=None
 ):
     """
-    Generate a deterministic package ID from title, source, and client type.
+    Generate a package ID from title, source, and client type.
 
-    The same title, source, client, category, and optional source identity produce
-    the same package_id, allowing clients to reliably blocklist erroneous releases.
+    Without a nonce the ID is DETERMINISTIC — the same title, source, client,
+    category, and optional source identity produce the same package_id, allowing
+    clients to reliably blocklist erroneous releases.
+
+    With a nonce it is UNIQUE per grab (Maja fork). Required for the SABnzbd
+    contract: real SAB mints a fresh nzo_id on every add and Sonarr keys its
+    download tracking by that id. A deterministic id that repeats across grab
+    attempts collides with Sonarr's history — once a release was recorded as
+    downloadFailed under id X, a LATER successful download reusing id X is treated
+    as already-handled and never tracked/imported (proven: E137 2026-07-08). The
+    live grab path (enqueue_grab) always passes a per-grab nonce.
 
     Args:
         title: Release title (e.g., "Movie.Name.2024.1080p.BluRay")
@@ -80,10 +91,102 @@ def generate_deterministic_package_id(
     hash_input = f"{normalized_title}|{normalized_source}|{normalized_client}"
     if normalized_identity:
         hash_input += f"|{normalized_identity}"
+    if nonce is not None:
+        hash_input = f"{hash_input}|{nonce}"
     hash_bytes = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
 
     # Use first 32 characters for good collision resistance (128-bit)
     return f"Quasarr_{final_download_category}_{hash_bytes[:32]}"
+
+
+def enqueue_grab(
+    shared_state,
+    request_from,
+    download_category,
+    title,
+    url,
+    size_mb,
+    password,
+    imdb_id,
+    source_key,
+):
+    """
+    Async accept path (Maja fork): the SABnzbd contract expects addurl/addfile to
+    return a nzo_id INSTANTLY (just queue it). v6's download() instead scrapes +
+    solves the CAPTCHA + adds to JD inline (15-40s) before answering — so a burst
+    of grabs blocks Sonarr's client requests, Sonarr times out / marks the client
+    unavailable and DROPS the tracking, while Quasarr finishes in the background →
+    orphaned completed downloads that never import. (Root cause of 'hängt /
+    verschwindet / kein Import' under load; RSS with 1 grab at a time never hit it.)
+
+    enqueue_grab() persists the grab and returns the unique nzo_id at once. The
+    waiting_worker processes it (calls download()) in the background, and
+    get_packages() renders it as a 'Fetching'/Queued slot from the first poll on,
+    so Sonarr tracks it reliably the whole time.
+    """
+    from quasarr.providers.host_bans import park_waiting
+
+    title = normalize_download_title(title)
+    client_type = extract_client_type(request_from)
+    src = (source_key or "").lower().strip() or "unknown"
+
+    # UNIQUE id per grab (SABnzbd contract). A deterministic id that repeats across
+    # grab attempts collides with Sonarr's history: once a release was recorded as
+    # downloadFailed under id X, a later successful download reusing X is treated as
+    # already-handled and never imported (proven live: E137, 2026-07-08). The per-grab
+    # nonce makes every grab a fresh nzo; the id stays stable for THIS grab's whole
+    # lifecycle (parked here, reused verbatim by the worker's download()).
+    nonce = f"{time.time():.6f}-{os.urandom(4).hex()}"
+    package_id = generate_deterministic_package_id(
+        title, src, client_type, download_category, nonce=nonce
+    )
+
+    park_waiting(
+        package_id,
+        {
+            "title": title,
+            "url": url,
+            "size_mb": size_mb,
+            "password": password,
+            "imdb_id": imdb_id,
+            "source_key": source_key,
+            "download_category": download_category,
+            "request_from": request_from,
+            "package_id": package_id,
+            "pending": True,
+        },
+    )
+    info(f'Queued "{title}" for background download (package {package_id}).')
+    return {"success": True, "package_id": package_id, "title": title, "queued": True}
+
+
+def retry_waiting_package(shared_state, package_id):
+    """
+    Run a package parked by enqueue_grab (or parked while its host was banned).
+    Removes the waiting row first so the dedupe check doesn't treat it as a
+    duplicate, then runs the normal download() with the stored context, reusing the
+    exact unique id enqueue_grab minted (never regenerate mid-lifecycle — that is
+    what detaches Sonarr's tracking). Returns the download() result (which may park
+    it again if the host is still banned).
+    """
+    from quasarr.providers.host_bans import delete_waiting, get_waiting
+
+    ctx = get_waiting(package_id)
+    if not ctx:
+        return None
+    delete_waiting(package_id)
+    return download(
+        shared_state,
+        ctx.get("request_from", ""),
+        ctx.get("download_category"),
+        ctx.get("title"),
+        ctx.get("url"),
+        ctx.get("size_mb"),
+        ctx.get("password"),
+        ctx.get("imdb_id"),
+        ctx.get("source_key"),
+        package_id=ctx.get("package_id") or package_id,
+    )
 
 
 # =============================================================================
@@ -524,9 +627,15 @@ def download(
     password,
     imdb_id,
     source_key,
+    package_id=None,
 ):
     """
     Main download entry point.
+
+    Maja fork: ``package_id`` lets the async path (waiting_worker ->
+    retry_waiting_package) hand back the UNIQUE id enqueue_grab already minted, so
+    it stays stable across the grab's whole lifecycle. Without it the id is
+    generated deterministically as before.
 
     Args:
         shared_state: Application shared state
@@ -540,7 +649,7 @@ def download(
         source_key: Hostname shorthand from search. If not provided,
                     will be derived from URL matching against configured hostnames.
     """
-    package_id = None
+    # package_id may be supplied by the async path; only default it when absent.
     package_identity = None
     package_identity_source_key = None
     try:
@@ -632,14 +741,16 @@ def download(
             source_key or detected_source_key or package_identity_source_key
         )
 
-        # Generate DETERMINISTIC package_id
-        package_id = generate_deterministic_package_id(
-            title,
-            final_source_key,
-            client_type,
-            download_category,
-            identity=package_identity,
-        )
+        # Generate DETERMINISTIC package_id (unless the async path handed us the
+        # unique id it already minted — reusing it keeps Sonarr's tracking intact).
+        if package_id is None:
+            package_id = generate_deterministic_package_id(
+                title,
+                final_source_key,
+                client_type,
+                download_category,
+                identity=package_identity,
+            )
 
         # Skip Download if package_id already exists
         if package_id_exists(shared_state, package_id):
