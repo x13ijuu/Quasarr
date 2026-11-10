@@ -142,6 +142,20 @@ def get_search_results(
 
         if base_search_category in [SEARCH_CAT_MOVIES, SEARCH_CAT_SHOWS]:
             args = (shared_state, start_time, behavior_search_category)
+            # Maja fork: an absolute-numbered request (episode, no season) maps to
+            # one or MORE (season, episode) pairs — Sonarr's scene absolute number
+            # restarts per season on many anime, so "17" may be S01E17..S04E17.
+            # Picking one silently made season 1 the answer to every such request.
+            # Sources that fetch whole series and filter locally get the full set;
+            # sources that bake season/episode into their query get the best single
+            # candidate. Fail-open: an empty list is the old behaviour.
+            absolute_candidates = []
+            if imdb_id and episode and not season:
+                from quasarr.providers.sonarr_api import resolve_absolute_candidates
+
+                absolute_candidates = resolve_absolute_candidates(
+                    shared_state, imdb_id, episode
+                )
             for source in sources.values():
                 source_logger = get_source_logger(source.initials)
 
@@ -168,15 +182,43 @@ def get_search_results(
                     source_logger.warn("IMDb ID unsupported")
                     continue
 
-                if episode and not season and not source.supports_absolute_numbering:
-                    source_logger.trace("Search with absolute EP number unsupported")
-                    continue
+                source_season, source_episode = season, episode
+                source_pairs = None
+
+                if episode and not season:
+                    if absolute_candidates and getattr(
+                        source, "supports_candidate_pairs", False
+                    ):
+                        # Tuple, not list: the kwargs land in the cache key
+                        # (frozenset(kwargs.items())) and must be hashable.
+                        source_pairs = tuple(
+                            tuple(pair) for pair in absolute_candidates
+                        )
+                    if not source.supports_absolute_numbering:
+                        if not absolute_candidates:
+                            source_logger.trace(
+                                "Search with absolute EP number unsupported"
+                            )
+                            continue
+                        source_season, source_episode = absolute_candidates[0]
+                        source_logger.trace(
+                            f"Absolute E{episode} translated to "
+                            f"S{source_season}E{source_episode}"
+                            + (
+                                f" (of {len(absolute_candidates)} candidates)"
+                                if len(absolute_candidates) > 1
+                                else ""
+                            )
+                        )
 
                 kwargs = {
                     "search_string": imdb_id,
-                    "season": season,
-                    "episode": episode,
+                    "season": source_season,
+                    "episode": source_episode,
                 }
+
+                if source_pairs:
+                    kwargs["accepted_pairs"] = source_pairs
 
                 if episode_date:
                     if not source.supports_date_numbering:
@@ -361,6 +403,25 @@ def get_search_results(
     return sliced_results
 
 
+def _hashable(value):
+    """Return a hashable stand-in for a kwarg value.
+
+    Maja fork: the search cache key is ``frozenset(kwargs.items())``, so a single
+    unhashable kwarg raised TypeError inside the executor — and a search that
+    raises returns ZERO releases to Sonarr. That looks exactly like "this source
+    has nothing", which is the silent-wrongness class this fork exists to remove.
+    Normalising here means a future list-valued kwarg costs a tuple conversion
+    instead of every anime search.
+    """
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_hashable(item) for item in value)
+    if isinstance(value, dict):
+        return tuple(sorted((k, _hashable(v)) for k, v in value.items()))
+    return value
+
+
 class SearchExecutor:
     def __init__(self, deadline=None):
         self.searches = []
@@ -388,7 +449,14 @@ class SearchExecutor:
         if cache_category is not None and len(key_args) >= 3:
             key_args[2] = cache_category
         key_args = tuple(key_args)
-        key = hash((source.initials, action, key_args, frozenset(kwargs.items())))
+        key = hash(
+            (
+                source.initials,
+                action,
+                key_args,
+                frozenset((k, _hashable(v)) for k, v in kwargs.items()),
+            )
+        )
         self.searches.append(
             (
                 key,

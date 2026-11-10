@@ -20,6 +20,7 @@ from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostnam
 from quasarr.providers.imdb_metadata import get_localized_title, get_year
 from quasarr.providers.log import debug, error, info, trace, warn
 from quasarr.providers.sessions.al import fetch_via_requests_session, invalidate_session
+from quasarr.identity import first_seen
 from quasarr.providers.utils import (
     convert_to_mb,
     generate_download_link,
@@ -125,6 +126,11 @@ class Source(AbstractSearchSource):
                     continue
 
                 date_converted = ""
+                # Maja fork: AL states age relatively ("vor 7 Stunden"), so the
+                # absolute timestamp the feed must carry is DERIVED from the current
+                # time — a moving date. Remember which kind this is; a derived one is
+                # anchored per release below, once the identifying title is known.
+                date_is_derived = False
                 small_tag = tr.find("small", class_="text-muted")
                 if small_tag:
                     raw_date_str = small_tag.get_text(strip=True)
@@ -132,6 +138,7 @@ class Source(AbstractSearchSource):
                         dt = _parse_relative_date(raw_date_str)
                         if dt:
                             date_converted = dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
+                            date_is_derived = True
                     else:
                         try:
                             date_converted = _convert_to_rss_date(raw_date_str)
@@ -149,6 +156,19 @@ class Source(AbstractSearchSource):
 
                     # Build payload using final_title
                     mb = 0  # size not available in feed
+
+                    # Maja fork: hold the date still. Without this the same release
+                    # is offered with a new pubDate on every poll, and Sonarr's
+                    # blocklist — which matches releases on publication date — can
+                    # never recognise what it just blocklisted (measured 2026-08-31:
+                    # One Piece E1176, 29 grabs in 7h vs 29 blocklist rows, none ever
+                    # matched). A stated absolute date is already stable and untouched.
+                    release_date = date_converted
+                    if date_is_derived and date_converted:
+                        release_date = first_seen.anchor(
+                            self.initials, url, final_title, date_converted
+                        )
+
                     link = generate_download_link(
                         shared_state,
                         final_title,
@@ -169,7 +189,7 @@ class Source(AbstractSearchSource):
                                     "imdb_id": None,
                                     "link": link,
                                     "size": mb * 1024 * 1024,
-                                    "date": date_converted,
+                                    "date": release_date,
                                     "source": url,
                                 },
                                 "type": "protected",
