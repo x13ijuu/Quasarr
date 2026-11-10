@@ -17,8 +17,9 @@ from quasarr.downloads.linkcrypters.hide import decrypt_links_if_hide
 from quasarr.downloads.mirror_filters import filter_final_download_urls
 from quasarr.downloads.packages import get_packages
 from quasarr.downloads.sources import get_sources as get_download_sources
+from quasarr.identity.refusals import record_unresolvable
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
-from quasarr.providers.log import error, info, warn
+from quasarr.providers.log import debug, error, info, warn
 from quasarr.providers.notifications import (
     send_notification,
     send_tracked_notification,
@@ -847,12 +848,37 @@ def download(
                 identity=package_identity,
             )
 
+        # Maja fork: note who this grab belongs to. When the package finishes, the
+        # only identity in scope is the JD package + its comment (= package_id), and
+        # the package_id carries a per-grab nonce — it cannot lead back to the RELEASE.
+        # Without this note the refusal ledger could not name what it is refusing.
+        # Purely additive and fail-open; nothing downstream depends on it.
+        try:
+            from quasarr.identity import refusals
+
+            refusals.remember_grab(package_id, final_source_key, url, title)
+        except Exception as e:
+            debug(f"Could not remember grab identity for {package_id}: {e}")
+
         # Skip Download if package_id already exists
         if package_id_exists(shared_state, package_id):
             warn(f"Package {package_id} already exists. Skipping download!")
             return {"success": True, "package_id": package_id, "title": title}
 
         if source_result is None:
+            # Maja fork (regrab-loop D2): every "cannot resolve" path funnels through
+            # here (no source claimed the URL, the claiming source came back empty, the
+            # page moved on). Up to maja.39 this only failed the grab, so the next feed
+            # offered the release again and the client re-grabbed it — 29× in 7h for One
+            # Piece E1176 (2026-08-31). Recording the refusal HERE (the funnel, not one
+            # source) is what makes the backstop match every source. Soft + backoff:
+            # "not resolvable" is usually temporary, so the release returns on its own.
+            record_unresolvable(
+                normalized_source_key or detected_source_key,
+                url,
+                title,
+                "no source could resolve this release",
+            )
             result = fail(
                 title,
                 package_id,
