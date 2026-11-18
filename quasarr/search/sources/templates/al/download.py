@@ -251,7 +251,7 @@ class Source(AbstractDownloadSource):
                             mark_hostname_issue(
                                 Source.initials,
                                 "download",
-                                str(e) if "e" in dir() else "Download error",
+                                e,
                             )
                         else:
                             info(
@@ -275,14 +275,14 @@ class Source(AbstractDownloadSource):
                     mark_hostname_issue(
                         Source.initials,
                         "download",
-                        str(e) if "e" in dir() else "Download error",
+                        e,
                     )
         except Exception as e:
             info(f"Error loading download: {e}")
             mark_hostname_issue(
                 Source.initials,
                 "download",
-                str(e) if "e" in dir() else "Download error",
+                e,
             )
             invalidate_session(shared_state)
         finally:
@@ -988,7 +988,7 @@ def _check_release(shared_state, details_html, release_id, title, episode_in_tit
             mark_hostname_issue(
                 Source.initials,
                 "download",
-                str(e) if "e" in dir() else "Download error",
+                e,
             )
 
     return title, release_id
