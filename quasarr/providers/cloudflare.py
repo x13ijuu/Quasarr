@@ -17,7 +17,12 @@ from quasarr.constants import (
     DOWNLOAD_REQUEST_TIMEOUT_SECONDS,
     SESSION_REQUEST_TIMEOUT_SECONDS,
 )
+<<<<<<< HEAD
 from quasarr.providers.log import debug, info, warn
+=======
+from quasarr.providers.hostname_issues import SiteUnreachableError
+from quasarr.providers.log import debug, warn
+>>>>>>> v.6.1.0
 from quasarr.providers.utils import is_flaresolverr_available
 
 _CLOUDFLARE_GATE_TTL_SECONDS = 24 * 60 * 60
@@ -87,6 +92,13 @@ _SESSION_CLEANUP_MAX_DELAY_SECONDS = 30
 _session_cleanup_condition = threading.Condition()
 _session_cleanup_pending = {}
 _session_cleanup_worker_running = False
+
+
+class FlareSolverrError(SiteUnreachableError, requests.RequestException, RuntimeError):
+    """FlareSolverr did not answer or did not solve in time.
+
+    Also a RequestException and a RuntimeError, which callers already catch.
+    """
 
 
 def _schedule_session_cleanup(flaresolverr_url, session_id):
@@ -355,7 +367,7 @@ class LazyFlareSolverrSession:
                 self.shared_state, requested_session_id
             )
             if not self.session_id:
-                raise requests.RequestException(
+                raise FlareSolverrError(
                     "Could not create FlareSolverr session for Cloudflare bypass"
                 )
 
@@ -447,11 +459,11 @@ def update_session_via_flaresolverr(
             "error": f"FlareSolverr request failed: {e}",
         }
     except Exception as e:
-        raise RuntimeError(f"Could not reach FlareSolverr: {e}") from e
+        raise FlareSolverrError(f"Could not reach FlareSolverr: {e}") from e
 
     fs_json = resp.json()
     if fs_json.get("status") != "ok" or "solution" not in fs_json:
-        raise RuntimeError(
+        raise FlareSolverrError(
             f"FlareSolverr did not return a valid solution: {fs_json.get('message', '<no message>')}"
         )
 
@@ -624,12 +636,12 @@ def flaresolverr_get(
             )
         resp.raise_for_status()
     except Exception as e:
-        raise RuntimeError(f"Error communicating with FlareSolverr: {e}") from e
+        raise FlareSolverrError(f"Error communicating with FlareSolverr: {e}") from e
 
     data = resp.json()
 
     if data.get("status") != "ok":
-        raise RuntimeError(f"FlareSolverr returned error: {data.get('message')}")
+        raise FlareSolverrError(f"FlareSolverr returned error: {data.get('message')}")
 
     solution = data.get("solution", {})
     html = solution.get("response", "")
@@ -717,12 +729,12 @@ def flaresolverr_post(
             )
         resp.raise_for_status()
     except Exception as e:
-        raise RuntimeError(f"Error communicating with FlareSolverr: {e}") from e
+        raise FlareSolverrError(f"Error communicating with FlareSolverr: {e}") from e
 
     data = resp.json()
 
     if data.get("status") != "ok":
-        raise RuntimeError(f"FlareSolverr returned error: {data.get('message')}")
+        raise FlareSolverrError(f"FlareSolverr returned error: {data.get('message')}")
 
     solution = data.get("solution", {})
     html = solution.get("response", "")
