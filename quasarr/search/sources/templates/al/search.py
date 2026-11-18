@@ -18,7 +18,7 @@ from quasarr.constants import (
 from quasarr.providers import shared_state
 from quasarr.providers.hostname_issues import clear_hostname_issue, mark_hostname_issue
 from quasarr.providers.imdb_metadata import get_localized_title, get_year
-from quasarr.providers.log import debug, error, info, trace, warn
+from quasarr.providers.log import debug, info, trace, warn
 from quasarr.providers.sessions.al import fetch_via_requests_session, invalidate_session
 from quasarr.identity import first_seen
 from quasarr.providers.utils import (
@@ -76,10 +76,8 @@ class Source(AbstractSearchSource):
             )
             r.raise_for_status()
         except Exception as e:
-            error(f"Could not fetch feed: {e}")
-            mark_hostname_issue(
-                self.initials, "feed", str(e) if "e" in dir() else "Error occurred"
-            )
+            warn(f"Could not fetch feed: {e}")
+            mark_hostname_issue(self.initials, "feed", e)
             invalidate_session(shared_state)
             return releases
 
@@ -198,9 +196,7 @@ class Source(AbstractSearchSource):
 
             except Exception as e:
                 info(f"Error parsing feed item: {e}")
-                mark_hostname_issue(
-                    self.initials, "feed", str(e) if "e" in dir() else "Error occurred"
-                )
+                mark_hostname_issue(self.initials, "feed", e)
 
         elapsed = time.time() - start_time
         debug(f"Time taken: {elapsed:.2f}s")
@@ -279,7 +275,7 @@ class Source(AbstractSearchSource):
                 mark_hostname_issue(
                     self.initials,
                     "search",
-                    str(e) if "e" in dir() else "Error occurred",
+                    e,
                 )
                 invalidate_session(shared_state)
                 continue
@@ -493,7 +489,7 @@ class Source(AbstractSearchSource):
                 mark_hostname_issue(
                     self.initials,
                     "search",
-                    str(e) if "e" in dir() else "Error occurred",
+                    e,
                 )
 
         elapsed = time.time() - start_time
